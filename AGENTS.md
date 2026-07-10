@@ -8,6 +8,7 @@
 - Do not commit OAuth secrets, cookies, tokens, `.mafile` files, passwords, or real account data.
 - The Worker owns secret-bearing OAuth calls. The plugin may store Yandex access/refresh tokens in `Lampa.Storage`, but must never contain `YANDEX_CLIENT_SECRET`.
 - In v1 only `watch_later` is synchronized with Kinopoisk. `watching` and `postponed` are local Lampa statuses unless a reliable Kinopoisk write API is verified.
+- Kinopoisk `watch_later` is shown in a dedicated Lampa component/menu item named `Буду смотреть`; do not write imported items into the standard Lampa `wath`/`Позже` favorites unless the user explicitly asks.
 - Ratings are resolved through the Worker endpoint `/ratings/resolve`, currently backed by Alloha data.
 - For important code changes, run `npm test` and `npm run check`.
 

@@ -12,6 +12,7 @@
     refreshToken: 'kp_bookmarks_refresh_token',
     tokenExpires: 'kp_bookmarks_token_expires',
     index: 'kp_bookmarks_index',
+    watchLaterItems: 'kp_bookmarks_watch_later_items',
     ratings: 'kp_bookmarks_ratings',
     deviceId: 'kp_bookmarks_device_id'
   };
@@ -35,6 +36,27 @@
 
   function setIndex(index) {
     Lampa.Storage.set(STORAGE.index, index || {});
+  }
+
+  function getWatchLaterItems() {
+    return normalizeStoredArray(Lampa.Storage.get(STORAGE.watchLaterItems, []));
+  }
+
+  function setWatchLaterItems(items) {
+    Lampa.Storage.set(STORAGE.watchLaterItems, items || []);
+  }
+
+  function normalizeStoredArray(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+      try {
+        var parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+    return [];
   }
 
   function getRatings() {
@@ -212,8 +234,9 @@
       });
 
       setIndex(index);
-      return importWatchLaterToLampa(data.movies || [], showNotice).then(function () {
-        if (showNotice) Lampa.Noty.show('Закладки Кинопоиска добавлены в Позже');
+      return buildWatchLaterItems(data.movies || [], showNotice).then(function (items) {
+        setWatchLaterItems(items);
+        if (showNotice) Lampa.Noty.show('Буду смотреть обновлено: ' + items.length);
         return index;
       });
     }).catch(function (error) {
@@ -222,27 +245,27 @@
     });
   }
 
-  function importWatchLaterToLampa(movies, showNotice) {
-    if (!Lampa.Favorite || !Lampa.Favorite.add) return Promise.resolve();
+  function buildWatchLaterItems(movies, showNotice) {
     var queue = Promise.resolve();
-    var imported = 0;
+    var items = [];
 
     movies.forEach(function (movie) {
       queue = queue.then(function () {
         return resolveMovie(movie).then(function (resolved) {
-          return addToLampaWatchLater(movie, resolved);
-        }).then(function (added) {
-          if (added) imported++;
+          return fetchTmdbCard(resolved.ids, resolved.meta, movie);
+        }).then(function (card) {
+          if (card && card.id) items.push(card);
         }).catch(function (error) {
-          console.log('Kinopoisk Bookmarks', 'favorite import failed', movie, error);
+          console.log('Kinopoisk Bookmarks', 'watch later item build failed', movie, error);
         });
       });
     });
 
     return queue.then(function () {
       if (showNotice && movies.length) {
-        console.log('Kinopoisk Bookmarks', 'Imported to Lampa Later:', imported, 'of', movies.length);
+        console.log('Kinopoisk Bookmarks', 'Built Kinopoisk watch later:', items.length, 'of', movies.length);
       }
+      return items;
     });
   }
 
@@ -352,19 +375,20 @@
     return card;
   }
 
-  function addToLampaWatchLater(sourceMovie, resolved) {
-    if (!Lampa.Favorite || !Lampa.Favorite.add) return Promise.resolve(false);
-
-    return fetchTmdbCard(resolved.ids, resolved.meta, sourceMovie).then(function (card) {
-      if (!card || !card.id) return false;
-      Lampa.Favorite.add('wath', card, 300);
-      return true;
+  function upsertWatchLaterItem(card) {
+    if (!card || !card.id) return;
+    var items = getWatchLaterItems().filter(function (item) {
+      return String(item.id) !== String(card.id);
     });
+    items.unshift(card);
+    setWatchLaterItems(items);
   }
 
-  function removeFromLampaWatchLater(movie) {
-    if (!Lampa.Favorite || !Lampa.Favorite.remove || !movie || !movie.id) return;
-    Lampa.Favorite.remove('wath', movie);
+  function removeWatchLaterItem(movie) {
+    if (!movie || !movie.id) return;
+    setWatchLaterItems(getWatchLaterItems().filter(function (item) {
+      return String(item.id) !== String(movie.id);
+    }));
   }
 
   function applyStatus(key, ids, movie, nextStatus) {
@@ -381,14 +405,14 @@
         }).then(function () {
           delete index[key];
           setIndex(index);
-          removeFromLampaWatchLater(movie);
+          removeWatchLaterItem(movie);
           Lampa.Noty.show('Закладка удалена');
         });
       }
 
       delete index[key];
       setIndex(index);
-      removeFromLampaWatchLater(movie);
+      removeWatchLaterItem(movie);
       Lampa.Noty.show('Закладка удалена');
       return Promise.resolve();
     }
@@ -408,9 +432,10 @@
       }).then(function () {
         index[key] = buildIndexItem(ids, movie, nextStatus, true);
         setIndex(index);
-        return addToLampaWatchLater(movie, { ids: ids, meta: {} });
-      }).then(function () {
-        Lampa.Noty.show('Добавлено в Буду смотреть и Позже');
+        return fetchTmdbCard(ids, {}, movie);
+      }).then(function (card) {
+        upsertWatchLaterItem(card);
+        Lampa.Noty.show('Добавлено в Буду смотреть');
       });
     }
 
@@ -577,14 +602,53 @@
       onChange: function () {
         setIndex({});
         setRatings({});
+        setWatchLaterItems([]);
         Lampa.Noty.show('Кэш закладок очищен');
       }
+    });
+  }
+
+  function openWatchLater() {
+    Lampa.Activity.push({
+      url: '',
+      title: 'Буду смотреть',
+      component: 'kp_bookmarks_watch_later',
+      page: 1
+    });
+  }
+
+  function addMenuItem() {
+    if ($('.menu .menu__list .kp-bookmarks-menu').length) return;
+
+    var button = $('<li class="menu__item selector kp-bookmarks-menu"><div class="menu__ico">' + ICON + '</div><div class="menu__text">Буду смотреть</div></li>');
+    button.on('hover:enter', openWatchLater);
+    $('.menu .menu__list').eq(0).append(button);
+  }
+
+  function component(object) {
+    var comp = new Lampa.InteractionCategory(object);
+    comp.create = function () {
+      watchLaterApi(object, this.build.bind(this), this.empty.bind(this));
+    };
+    comp.nextPageReuest = function (object, resolve, reject) {
+      watchLaterApi(object, resolve.bind(comp), reject.bind(comp));
+    };
+    return comp;
+  }
+
+  function watchLaterApi(params, oncomplete, onerror) {
+    var items = getWatchLaterItems();
+    oncomplete({
+      secuses: true,
+      page: 1,
+      results: items
     });
   }
 
   function startPlugin() {
     injectStyle();
     addSettings();
+    Lampa.Component.add('kp_bookmarks_watch_later', component);
 
     Lampa.Listener.follow('full', function (event) {
       if (event.type !== 'complite' || !event.data || !event.data.movie) return;
@@ -597,6 +661,13 @@
     Lampa.Listener.follow('activity', function () {
       setTimeout(patchVisibleCards, 700);
     });
+
+    if (window.appready) addMenuItem();
+    else {
+      Lampa.Listener.follow('app', function (event) {
+        if (event.type === 'ready') addMenuItem();
+      });
+    }
 
     if (Lampa.Storage.get(STORAGE.accessToken, '')) syncWatchLater(false);
     setInterval(patchVisibleCards, 3000);
