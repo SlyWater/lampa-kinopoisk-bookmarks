@@ -150,7 +150,12 @@
     }).then(function (data) {
       if (!data.user_code || !data.device_code) throw new Error('Device code response is incomplete');
 
-      var html = $('<div><div class="about">Перейдите на https://ya.ru/device и введите код<br><br><b>' + data.user_code + '</b><br><br></div><div class="broadcast__device selector" style="text-align:center">Готово</div></div>');
+      var html = $('<div><div class="about" style="text-align:center">Перейдите на https://ya.ru/device и введите код<br><br><div class="kp-bookmarks-auth-qr" style="display:inline-block;background:#fff;border-radius:.35em;color:#000"></div><br><br><b style="font-size:1.5em;letter-spacing:.08em">' + data.user_code + '</b><br><br></div><div class="broadcast__device selector" style="text-align:center">Готово</div></div>');
+      setTimeout(function () {
+        if (Lampa.Utils && Lampa.Utils.qrcode) {
+          Lampa.Utils.qrcode('https://ya.ru/device', html.find('.kp-bookmarks-auth-qr'));
+        }
+      }, 0);
       Lampa.Modal.open({
         title: 'Авторизация Кинопоиск',
         html: html,
