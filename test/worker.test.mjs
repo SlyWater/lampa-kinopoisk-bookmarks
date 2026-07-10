@@ -1,0 +1,132 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createWorkerHandler } from '../worker/src/index.js';
+
+test('GET /ratings/resolve maps Alloha response to ids and badges', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      assert.match(String(url), /api\.alloha\.tv/);
+      return jsonResponse({
+        status: 'success',
+        data: {
+          id_kp: 326,
+          id_tmdb: 278,
+          id_imdb: 'tt0111161',
+          rating_kp: 9.111,
+          rating_imdb: 9.3
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/ratings/resolve?kp=326'));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.deepEqual(data.ids, { tmdbId: '278', kinopoiskId: '326', imdbId: 'tt0111161' });
+  assert.deepEqual(data.badges, [
+    { source: 'KP', value: '9.1' },
+    { source: 'IMDb', value: '9.3' }
+  ]);
+});
+
+test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url, options) => {
+      assert.match(String(url), /graphql\.kinopoisk\.ru/);
+      assert.equal(options.headers.authorization, 'OAuth token');
+      return jsonResponse({
+        data: {
+          userProfile: {
+            userData: {
+              plannedToWatch: {
+                movies: {
+                  total: 1,
+                  items: [
+                    {
+                      createdAt: '2026-01-01T00:00:00.000Z',
+                      movie: {
+                        id: 326,
+                        title: { localized: 'Побег из Шоушенка', original: 'The Shawshank Redemption' },
+                        productionYear: 1994
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+    headers: { authorization: 'Bearer token' }
+  }));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.equal(data.movies[0].kinopoisk_id, '326');
+  assert.equal(data.bookmarkIndex['kp:326'].status, 'watch_later');
+});
+
+test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url, options) => {
+      const payload = JSON.parse(options.body);
+      assert.equal(payload.variables.movieId, 326);
+      return jsonResponse({
+        data: {
+          movie: {
+            plannedToWatch: {
+              add: { status: 'SUCCESS' }
+            }
+          }
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/watch-later/set', {
+    method: 'POST',
+    headers: { authorization: 'Bearer token', 'content-type': 'application/json' },
+    body: JSON.stringify({ kinopoisk_id: '326' })
+  }));
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+});
+
+test('POST /auth/token sends device-code OAuth exchange through Worker secret', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url, options) => {
+      assert.equal(String(url), 'https://oauth.yandex.ru/token');
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get('grant_type'), 'device_code');
+      assert.equal(form.get('client_id'), 'client');
+      assert.equal(form.get('client_secret'), 'secret');
+      assert.equal(form.get('code'), 'device');
+      return jsonResponse({ access_token: 'access', refresh_token: 'refresh', expires_in: 3600 });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/auth/token', {
+    method: 'POST',
+    body: JSON.stringify({ device_code: 'device' })
+  }), {
+    YANDEX_CLIENT_ID: 'client',
+    YANDEX_CLIENT_SECRET: 'secret'
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).access_token, 'access');
+});
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' }
+  });
+}

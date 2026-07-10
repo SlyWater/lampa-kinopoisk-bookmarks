@@ -1,0 +1,10 @@
+{
+  "name": "lampa-kinopoisk-bookmarks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check plugin/kinopoisk-bookmarks.js && node --check worker/src/index.js",
+    "test": "node --test"
+  }
+}

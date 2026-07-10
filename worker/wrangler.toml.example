@@ -1,0 +1,11 @@
+name = "lampa-kp-bookmarks"
+main = "src/index.js"
+compatibility_date = "2026-07-10"
+
+[vars]
+KINOPOISK_GRAPHQL_URL = "https://graphql.kinopoisk.ru/graphql/"
+
+# Store secrets with:
+# wrangler secret put YANDEX_CLIENT_ID
+# wrangler secret put YANDEX_CLIENT_SECRET
+# wrangler secret put ALLOHA_TOKEN
