@@ -1,9 +1,10 @@
 import http from 'node:http';
+import https from 'node:https';
 import { createWorkerHandler } from './src/index.js';
 
 const host = process.env.HOST || '0.0.0.0';
 const port = Number(process.env.PORT || 8787);
-const handler = createWorkerHandler({ fetch });
+const handler = createWorkerHandler({ fetch: nodeFetch });
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -57,4 +58,52 @@ async function writeNodeResponse(res, response) {
   res.writeHead(response.status, headers);
   const body = Buffer.from(await response.arrayBuffer());
   res.end(body);
+}
+
+function nodeFetch(input, init = {}) {
+  const url = new URL(typeof input === 'string' ? input : input.url);
+
+  if (url.hostname === 'api.alloha.tv' && url.protocol === 'https:') {
+    return insecureAllohaFetch(url, init);
+  }
+
+  return fetch(input, init);
+}
+
+function insecureAllohaFetch(url, init = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = headersToObject(init.headers);
+    const body = init.body;
+    const request = https.request(url, {
+      method: init.method || 'GET',
+      headers,
+      rejectUnauthorized: false
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const responseHeaders = new Headers();
+        Object.entries(response.headers).forEach(([key, value]) => {
+          if (Array.isArray(value)) responseHeaders.set(key, value.join(','));
+          else if (value !== undefined) responseHeaders.set(key, value);
+        });
+
+        resolve(new Response(Buffer.concat(chunks), {
+          status: response.statusCode || 200,
+          statusText: response.statusMessage || '',
+          headers: responseHeaders
+        }));
+      });
+    });
+
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+function headersToObject(headers = {}) {
+  if (headers instanceof Headers) return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  return headers;
 }
