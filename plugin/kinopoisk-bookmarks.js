@@ -597,6 +597,13 @@
 
     Lampa.SettingsApi.addParam({
       component: 'kp_bookmarks',
+      param: { type: 'button', name: 'kp_bookmarks_open_watch_later' },
+      field: { name: 'Открыть Буду смотреть' },
+      onChange: openWatchLater
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: 'kp_bookmarks',
       param: { type: 'button', name: 'kp_bookmarks_clear' },
       field: { name: 'Очистить локальный кэш' },
       onChange: function () {
@@ -619,10 +626,21 @@
 
   function addMenuItem() {
     if ($('.menu .menu__list .kp-bookmarks-menu').length) return;
+    var list = $('.menu .menu__list').eq(0);
+    if (!list.length) return;
 
     var button = $('<li class="menu__item selector kp-bookmarks-menu"><div class="menu__ico">' + ICON + '</div><div class="menu__text">Буду смотреть</div></li>');
     button.on('hover:enter', openWatchLater);
-    $('.menu .menu__list').eq(0).append(button);
+    list.append(button);
+  }
+
+  function scheduleMenuItem() {
+    var attempts = 0;
+    var timer = setInterval(function () {
+      addMenuItem();
+      attempts++;
+      if ($('.menu .menu__list .kp-bookmarks-menu').length || attempts >= 20) clearInterval(timer);
+    }, 500);
   }
 
   function component(object) {
@@ -662,12 +680,16 @@
       setTimeout(patchVisibleCards, 700);
     });
 
-    if (window.appready) addMenuItem();
+    if (window.appready) scheduleMenuItem();
     else {
       Lampa.Listener.follow('app', function (event) {
-        if (event.type === 'ready') addMenuItem();
+        if (event.type === 'ready') scheduleMenuItem();
       });
     }
+
+    Lampa.Listener.follow('activity', function () {
+      scheduleMenuItem();
+    });
 
     if (Lampa.Storage.get(STORAGE.accessToken, '')) syncWatchLater(false);
     setInterval(patchVisibleCards, 3000);
