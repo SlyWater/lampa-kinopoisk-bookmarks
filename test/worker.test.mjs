@@ -320,6 +320,71 @@ test('GET /bookmarks/list removes duplicate Kinopoisk movies', async () => {
   assert.equal(data.diagnostics.duplicateMoviesCount, 1);
 });
 
+test('POST /bookmarks/sync/start exposes progress and keeps partial card results', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 2,
+                    items: [
+                      { movie: { id: 1, title: { localized: 'One', original: 'One' }, productionYear: 2026 } },
+                      { movie: { id: 2, title: { localized: 'Two', original: 'Two' }, productionYear: 2026 } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      if (text.includes('api.alloha.tv') && text.includes('kp=1')) {
+        return jsonResponse({ status: 'success', data: { id_kp: 1, id_tmdb: 101, category: 1, original_name: 'One', year: 2026 } });
+      }
+      if (text.includes('api.alloha.tv') && text.includes('kp=2')) {
+        throw new Error('Alloha timeout');
+      }
+      if (text.includes('tmdb.cub.red/3/movie/101')) {
+        return jsonResponse({ id: 101, title: 'One', release_date: '2026-01-01' });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const started = await handler(new Request('https://worker.test/bookmarks/sync/start?refresh=1', {
+    method: 'POST',
+    headers: { authorization: 'Bearer progress-token' }
+  }));
+  assert.equal(started.status, 202);
+
+  const startData = await started.json();
+  assert.ok(startData.jobId);
+
+  let statusData = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const status = await handler(new Request(`https://worker.test/bookmarks/sync/status?id=${startData.jobId}`, {
+      headers: { authorization: 'Bearer progress-token' }
+    }));
+    assert.equal(status.status, 200);
+    statusData = await status.json();
+    if (statusData.status === 'done') break;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.equal(statusData.status, 'done');
+  assert.equal(statusData.processed, 2);
+  assert.equal(statusData.total, 2);
+  assert.equal(statusData.cardsCount, 1);
+  assert.equal(statusData.unresolvedCount, 1);
+  assert.equal(statusData.result.cards.length, 1);
+  assert.equal(statusData.result.diagnostics.unresolvedCount, 1);
+});
+
 test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {
   const handler = createWorkerHandler({
     fetch: async (url, options) => {

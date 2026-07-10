@@ -18,6 +18,8 @@
 - `POST /auth/token`
 - `POST /auth/refresh`
 - `GET /bookmarks/list`
+- `POST /bookmarks/sync/start`
+- `GET /bookmarks/sync/status`
 - `POST /bookmarks/watch-later/set`
 - `POST /bookmarks/watch-later/remove`
 - `GET /ratings/resolve`
@@ -30,4 +32,4 @@
 - Kinopoisk GraphQL query/mutation shape follows the publicly observed `plannedToWatch.add/remove.status` response contract from existing Lampa Kinopoisk plugins.
 - `/bookmarks/list` may be slow because it enriches Kinopoisk items into TMDB cards; the backend uses short in-memory per-token caching plus in-flight request sharing, and the plugin blocks parallel sync starts.
 - Watch-later cards must be deduplicated by Kinopoisk id first, then by TMDB media type/id fallback.
-- Server auto-deploy is handled by `.github/workflows/deploy-server.yml`: it SSHes to the server, runs `git pull --ff-only origin main`, and restarts the configured systemd service.
+- Manual watch-later sync uses in-memory backend jobs (`/bookmarks/sync/start`, `/bookmarks/sync/status`) so the Lampa plugin can show progress while cards are being enriched.

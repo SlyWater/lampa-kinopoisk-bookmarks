@@ -27,6 +27,8 @@
   var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4.75C6 3.78 6.78 3 7.75 3h8.5C17.22 3 18 3.78 18 4.75v15.5l-6-3.35-6 3.35V4.75Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
   var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
   var syncWatchLaterPromise = null;
+  var syncProgressModalOpen = false;
+  var syncProgressCloseTimer = null;
 
   function getProxyUrl() {
     return String(Lampa.Storage.get(STORAGE.proxyUrl, DEFAULT_PROXY_URL) || DEFAULT_PROXY_URL).replace(/\/+$/, '');
@@ -257,10 +259,8 @@
       return syncWatchLaterPromise;
     }
 
-    var path = '/bookmarks/list' + (showNotice ? '?refresh=1' : '');
-
     syncWatchLaterPromise = ensureToken().then(function () {
-      return api(path, { auth: true });
+      return showNotice ? runWatchLaterSyncJob() : api('/bookmarks/list', { auth: true });
     }).then(function (data) {
       var index = getIndex();
       var remoteKeys = {};
@@ -300,6 +300,7 @@
           })
         });
         if (showNotice) Lampa.Noty.show('Буду смотреть обновлено: ' + uniqueItems.length);
+        if (showNotice) closeSyncProgressModal(900);
         return index;
       });
     }).catch(function (error) {
@@ -309,6 +310,8 @@
         cacheCount: getWatchLaterItems().length,
         error: error.message || String(error)
       });
+      if (showNotice) updateSyncProgress({ status: 'error', message: error.message || String(error), error: error.message || String(error) });
+      if (showNotice) closeSyncProgressModal(1800);
       if (showNotice) Lampa.Noty.show('Не удалось синхронизировать закладки');
       console.log('Kinopoisk Bookmarks', error);
     });
@@ -319,6 +322,45 @@
     }, function (error) {
       syncWatchLaterPromise = null;
       throw error;
+    });
+  }
+
+  function runWatchLaterSyncJob() {
+    openSyncProgressModal();
+    updateSyncProgress({ message: 'Запускаю синхронизацию', processed: 0, total: 0, percent: 0 });
+
+    return api('/bookmarks/sync/start?refresh=1', { method: 'POST', auth: true }).then(function (start) {
+      if (start.result) {
+        updateSyncProgress(start.progress || { status: 'done', percent: 100, message: 'Синхронизация завершена' });
+        return start.result;
+      }
+      if (!start.jobId) return api('/bookmarks/list?refresh=1', { auth: true });
+      updateSyncProgress(start.progress || start);
+      return pollWatchLaterSyncJob(start.jobId);
+    }).catch(function (error) {
+      if (error && error.status === 404) return api('/bookmarks/list?refresh=1', { auth: true });
+      throw error;
+    });
+  }
+
+  function pollWatchLaterSyncJob(jobId) {
+    return new Promise(function (resolve, reject) {
+      function tick() {
+        api('/bookmarks/sync/status?id=' + encodeURIComponent(jobId), { auth: true }).then(function (status) {
+          updateSyncProgress(status);
+          if (status.status === 'done' && status.result) {
+            resolve(status.result);
+            return;
+          }
+          if (status.status === 'error') {
+            reject(new Error(status.error || status.message || 'Sync failed'));
+            return;
+          }
+          setTimeout(tick, 900);
+        }).catch(reject);
+      }
+
+      setTimeout(tick, 450);
     });
   }
 
@@ -637,9 +679,57 @@
     });
   }
 
+  function openSyncProgressModal() {
+    if (syncProgressCloseTimer) clearTimeout(syncProgressCloseTimer);
+    syncProgressCloseTimer = null;
+    syncProgressModalOpen = true;
+
+    var html = $('<div class="about kp-bookmarks-sync-progress"><div class="kp-bookmarks-sync-progress-title">Подготовка</div><div class="kp-bookmarks-sync-progress-bar"><div class="kp-bookmarks-sync-progress-fill"></div></div><div class="kp-bookmarks-sync-progress-numbers">0%</div><div class="kp-bookmarks-sync-progress-details"></div></div>');
+    Lampa.Modal.open({
+      title: 'Синхронизация Буду смотреть',
+      html: html,
+      size: 'medium',
+      onBack: function () {
+        syncProgressModalOpen = false;
+        Lampa.Modal.close();
+      }
+    });
+  }
+
+  function updateSyncProgress(status) {
+    if (!syncProgressModalOpen) return;
+    status = status || {};
+    var total = Number(status.total || 0);
+    var processed = Number(status.processed || 0);
+    var percent = Number(status.percent || (total ? Math.round(processed / total * 100) : 0));
+    if (status.status === 'done') percent = 100;
+    if (!Number.isFinite(percent)) percent = 0;
+    percent = Math.max(0, Math.min(100, percent));
+
+    $('.kp-bookmarks-sync-progress-fill').css('width', percent + '%');
+    $('.kp-bookmarks-sync-progress-title').text(status.message || 'Синхронизация');
+    $('.kp-bookmarks-sync-progress-numbers').text(percent + '%');
+
+    var details = [];
+    if (total) details.push('Обработано: ' + processed + ' из ' + total);
+    if (status.cardsCount !== undefined) details.push('Карточек: ' + Number(status.cardsCount || 0));
+    if (status.unresolvedCount !== undefined) details.push('Не сопоставлено: ' + Number(status.unresolvedCount || 0));
+    if (status.error) details.push('Ошибка: ' + status.error);
+    $('.kp-bookmarks-sync-progress-details').html(escapeHtml(details.join('\n')));
+  }
+
+  function closeSyncProgressModal(delay) {
+    if (syncProgressCloseTimer) clearTimeout(syncProgressCloseTimer);
+    syncProgressCloseTimer = setTimeout(function () {
+      if (!syncProgressModalOpen) return;
+      syncProgressModalOpen = false;
+      Lampa.Modal.close();
+    }, delay || 0);
+  }
+
   function injectStyle() {
     if ($('#kp-bookmarks-style').length) return;
-    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:9em;height:9em;max-width:38vw;max-height:38vw;margin:.75em auto .5em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;margin:.55em auto .25em;font-size:1.55em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}</style>');
+    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:9em;height:9em;max-width:38vw;max-height:38vw;margin:.75em auto .5em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;margin:.55em auto .25em;font-size:1.55em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}.kp-bookmarks-sync-progress{text-align:left}.kp-bookmarks-sync-progress-title{font-size:1.05em;margin-bottom:.8em}.kp-bookmarks-sync-progress-bar{height:.55em;background:rgba(255,255,255,.18);border-radius:.35em;overflow:hidden;margin-bottom:.55em}.kp-bookmarks-sync-progress-fill{width:0;height:100%;background:#f0c14b;border-radius:.35em;transition:width .25s ease}.kp-bookmarks-sync-progress-numbers{font-size:.95em;margin-bottom:.6em}.kp-bookmarks-sync-progress-details{white-space:pre-wrap;opacity:.82;font-size:.86em;line-height:1.35}</style>');
   }
 
   function renderRatingBadges(container, ratings) {

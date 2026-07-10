@@ -22,13 +22,13 @@ export default {
 
 export function createWorkerHandler(deps = {}) {
   const fetchImpl = deps.fetch || fetch;
-  const state = deps.state || {
-    bookmarksCache: new Map(),
-    bookmarksInFlight: new Map(),
-    bookmarksCacheGeneration: 0
-  };
+  const state = deps.state || {};
+  state.bookmarksCache = state.bookmarksCache || new Map();
+  state.bookmarksInFlight = state.bookmarksInFlight || new Map();
+  state.bookmarksJobs = state.bookmarksJobs || new Map();
+  state.bookmarksCacheGeneration = state.bookmarksCacheGeneration || 0;
 
-  return async function handleRequest(request, env = {}) {
+  return async function handleRequest(request, env = {}, ctx = {}) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: JSON_HEADERS });
 
     const url = new URL(request.url);
@@ -39,6 +39,8 @@ export function createWorkerHandler(deps = {}) {
       if (url.pathname === '/auth/token' && request.method === 'POST') return authToken(fetchImpl, env, request, 'device_code');
       if (url.pathname === '/auth/refresh' && request.method === 'POST') return authToken(fetchImpl, env, request, 'refresh_token');
       if (url.pathname === '/bookmarks/list' && request.method === 'GET') return listBookmarks(fetchImpl, env, request, state);
+      if (url.pathname === '/bookmarks/sync/start' && request.method === 'POST') return startBookmarksSync(fetchImpl, env, request, state, ctx);
+      if (url.pathname === '/bookmarks/sync/status' && request.method === 'GET') return getBookmarksSyncStatus(request, state);
       if (url.pathname === '/bookmarks/watch-later/set' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'add', state);
       if (url.pathname === '/bookmarks/watch-later/remove' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'remove', state);
       if (url.pathname === '/ratings/resolve' && (request.method === 'GET' || request.method === 'POST')) return resolveRatings(fetchImpl, env, request);
@@ -129,7 +131,73 @@ async function listBookmarks(fetchImpl, env, request, state) {
   }
 }
 
-async function buildBookmarksPayload(fetchImpl, env, token, enrich, full) {
+async function startBookmarksSync(fetchImpl, env, request, state, ctx) {
+  const token = getBearerToken(request);
+  if (!token) return json({ error: 'missing_authorization' }, 401);
+
+  cleanupBookmarkJobs(state);
+  const url = new URL(request.url);
+  const enrich = url.searchParams.get('enrich') !== '0';
+  const full = url.searchParams.get('full') !== '0';
+  const refresh = url.searchParams.get('refresh') === '1';
+  const cacheKey = await bookmarksCacheKey(token, { enrich, full });
+  const cacheTtl = positiveInteger(env.BOOKMARKS_CACHE_TTL_MS, 300000, 1000, 3600000);
+
+  if (!refresh) {
+    const cached = getCachedBookmarks(state, cacheKey, cacheTtl);
+    if (cached) {
+      return json({
+        status: 'done',
+        progress: doneProgress(cached),
+        result: withCacheDiagnostics(cached, true, false)
+      });
+    }
+  }
+
+  const cacheGeneration = state.bookmarksCacheGeneration;
+  const job = createBookmarkJob();
+  state.bookmarksJobs.set(job.id, job);
+
+  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full, (progress) => updateBookmarkJob(job, progress))
+    .then((data) => {
+      if (state.bookmarksCacheGeneration === cacheGeneration) {
+        state.bookmarksCache.set(cacheKey, {
+          time: Date.now(),
+          data: cloneJson(data)
+        });
+      }
+      updateBookmarkJob(job, doneProgress(data));
+      job.status = 'done';
+      job.result = withCacheDiagnostics(data, false, false);
+      job.finishedAt = Date.now();
+    })
+    .catch((error) => {
+      job.status = 'error';
+      job.error = error.message || String(error);
+      job.message = 'Ошибка синхронизации';
+      job.finishedAt = Date.now();
+    });
+
+  job.promise = pending;
+  if (ctx?.waitUntil) ctx.waitUntil(pending);
+
+  return json({
+    jobId: job.id,
+    status: job.status,
+    progress: publicBookmarkJob(job)
+  }, 202);
+}
+
+function getBookmarksSyncStatus(request, state) {
+  cleanupBookmarkJobs(state);
+  const id = new URL(request.url).searchParams.get('id') || '';
+  const job = state.bookmarksJobs.get(id);
+  if (!job) return json({ error: 'job_not_found' }, 404);
+  return json(publicBookmarkJob(job));
+}
+
+async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProgress) {
+  if (onProgress) onProgress({ phase: 'list', message: 'Получаю список Кинопоиска', processed: 0, total: 0 });
   let data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
   let items = extractWatchLaterItems(data);
   let movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
@@ -139,6 +207,7 @@ async function buildBookmarksPayload(fetchImpl, env, token, enrich, full) {
   diagnostics.duplicateMoviesCount = movieDedupe.duplicates;
 
   if (!movies.length && env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1') {
+    if (onProgress) onProgress({ phase: 'list', message: 'Получаю список через fallback', processed: 0, total: 0 });
     const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token, full);
     const fallbackItems = extractWatchLaterItems(fallback);
     const fallbackMovieDedupe = dedupeKinopoiskMovies(fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean));
@@ -155,7 +224,17 @@ async function buildBookmarksPayload(fetchImpl, env, token, enrich, full) {
       diagnostics.fallback.duplicateMoviesCount = fallbackMovieDedupe.duplicates;
     }
   }
-  const cardResult = enrich ? await buildLampaCards(fetchImpl, env, movies) : { cards: [], unresolved: [] };
+  if (onProgress) {
+    onProgress({
+      phase: enrich ? 'cards' : 'done',
+      message: enrich ? 'Собираю карточки Lampa' : 'Список получен',
+      processed: enrich ? 0 : movies.length,
+      total: movies.length,
+      moviesCount: movies.length
+    });
+  }
+
+  const cardResult = enrich ? await buildLampaCards(fetchImpl, env, movies, onProgress) : { cards: [], unresolved: [] };
   diagnostics.cardsCount = cardResult.cards.length;
   diagnostics.duplicateCardsCount = cardResult.duplicates || 0;
   diagnostics.unresolvedCount = cardResult.unresolved.length;
@@ -278,26 +357,48 @@ async function resolveAlloha(fetchImpl, env, query) {
   });
 }
 
-async function buildLampaCards(fetchImpl, env, movies) {
+async function buildLampaCards(fetchImpl, env, movies, onProgress) {
   const cardsByIndex = new Array(movies.length);
   const unresolved = [];
   let nextIndex = 0;
+  let processed = 0;
   const concurrency = Math.min(
     movies.length || 1,
-    positiveInteger(env.BOOKMARKS_ENRICH_CONCURRENCY, 8, 1, 16)
+    positiveInteger(env.BOOKMARKS_ENRICH_CONCURRENCY, 3, 1, 16)
   );
 
   async function worker() {
     while (nextIndex < movies.length) {
       const currentIndex = nextIndex++;
       const movie = movies[currentIndex];
-      const card = await buildLampaCard(fetchImpl, env, movie);
-      if (card) cardsByIndex[currentIndex] = card;
-      else unresolved.push({
-        kinopoisk_id: movie.kinopoisk_id,
-        title: movie.title,
-        year: movie.year
-      });
+      try {
+        const card = await buildLampaCard(fetchImpl, env, movie);
+        if (card) cardsByIndex[currentIndex] = card;
+        else unresolved.push({
+          kinopoisk_id: movie.kinopoisk_id,
+          title: movie.title,
+          year: movie.year
+        });
+      } catch (error) {
+        unresolved.push({
+          kinopoisk_id: movie.kinopoisk_id,
+          title: movie.title,
+          year: movie.year,
+          error: error.message || String(error)
+        });
+      } finally {
+        processed += 1;
+        if (onProgress) {
+          onProgress({
+            phase: 'cards',
+            message: 'Собираю карточки Lampa',
+            processed,
+            total: movies.length,
+            cardsCount: cardsByIndex.filter(Boolean).length,
+            unresolvedCount: unresolved.length
+          });
+        }
+      }
     }
   }
 
@@ -507,6 +608,69 @@ function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
+function createBookmarkJob() {
+  const now = Date.now();
+  return {
+    id: randomId(),
+    status: 'running',
+    phase: 'list',
+    message: 'Запускаю синхронизацию',
+    processed: 0,
+    total: 0,
+    moviesCount: 0,
+    cardsCount: 0,
+    unresolvedCount: 0,
+    startedAt: now,
+    updatedAt: now,
+    finishedAt: null,
+    result: null,
+    error: ''
+  };
+}
+
+function updateBookmarkJob(job, progress) {
+  Object.assign(job, progress || {});
+  job.updatedAt = Date.now();
+}
+
+function publicBookmarkJob(job) {
+  return {
+    jobId: job.id,
+    status: job.status,
+    phase: job.phase,
+    message: job.message,
+    processed: Number(job.processed || 0),
+    total: Number(job.total || 0),
+    moviesCount: Number(job.moviesCount || 0),
+    cardsCount: Number(job.cardsCount || 0),
+    unresolvedCount: Number(job.unresolvedCount || 0),
+    percent: job.total ? Math.min(100, Math.round((Number(job.processed || 0) / Number(job.total)) * 100)) : 0,
+    error: job.error || '',
+    result: job.status === 'done' ? job.result : undefined
+  };
+}
+
+function doneProgress(data) {
+  const total = (data.movies || []).length;
+  return {
+    phase: 'done',
+    message: 'Синхронизация завершена',
+    processed: total,
+    total,
+    moviesCount: total,
+    cardsCount: (data.cards || []).length,
+    unresolvedCount: data.diagnostics?.unresolvedCount || 0
+  };
+}
+
+function cleanupBookmarkJobs(state) {
+  const now = Date.now();
+  for (const [id, job] of state.bookmarksJobs) {
+    const age = now - (job.finishedAt || job.startedAt || now);
+    if (age > 10 * 60 * 1000) state.bookmarksJobs.delete(id);
+  }
+}
+
 function getCachedBookmarks(state, key, ttl) {
   const entry = state.bookmarksCache.get(key);
   if (!entry || Date.now() - entry.time > ttl) return null;
@@ -557,6 +721,11 @@ function positiveInteger(value, fallback, min, max) {
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function randomId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 const WATCH_LATER_QUERY = `
