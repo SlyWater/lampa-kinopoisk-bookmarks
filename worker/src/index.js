@@ -233,14 +233,25 @@ function requireEnv(env, key) {
 function normalizeKinopoiskListItem(item) {
   const movie = item.movie || item.item || item;
   if (!movie || !movie.id) return null;
+  const title = movie.title?.localized || movie.title?.russian || movie.title?.original || movie.name || '';
+  const originalTitle = movie.title?.original || movie.originalName || movie.original_title || title;
 
   return {
     kinopoisk_id: String(movie.id),
-    title: movie.title?.localized || movie.title?.original || movie.name || '',
-    original_title: movie.title?.original || movie.originalName || '',
+    title,
+    original_title: originalTitle,
     year: movie.productionYear || movie.year || null,
+    poster: normalizeKinopoiskPoster(movie),
     updatedAt: item.createdAt || item.updatedAt || new Date(0).toISOString()
   };
+}
+
+function normalizeKinopoiskPoster(movie) {
+  const candidate = movie.poster?.url || movie.poster?.previewUrl || movie.poster?.avatarsUrl || movie.posterUrl || movie.poster || movie.cover?.url || '';
+  if (!candidate || typeof candidate !== 'string') return '';
+  if (candidate.startsWith('//')) return `https:${candidate}`;
+  if (candidate.startsWith('http')) return candidate;
+  return candidate;
 }
 
 function extractWatchLaterItems(data) {

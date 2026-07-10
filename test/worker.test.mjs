@@ -125,7 +125,8 @@ test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData
                       movie: {
                         id: 500,
                         title: { localized: 'Фильм', original: 'Movie' },
-                        productionYear: 2026
+                        productionYear: 2026,
+                        poster: { avatarsUrl: '//avatars.mds.yandex.net/get-kinopoisk-image/example/600x900' }
                       }
                     }
                   ]
@@ -146,6 +147,7 @@ test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData
   const data = await response.json();
   assert.equal(calls, 2);
   assert.equal(data.movies[0].kinopoisk_id, '500');
+  assert.equal(data.movies[0].poster, 'https://avatars.mds.yandex.net/get-kinopoisk-image/example/600x900');
   assert.equal(data.diagnostics.source, 'apps_script');
 });
 

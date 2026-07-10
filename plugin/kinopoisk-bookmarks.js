@@ -281,8 +281,8 @@
 
     movies.forEach(function (movie) {
       queue = queue.then(function () {
-        return resolveMovie(movie).then(function (resolved) {
-          return fetchTmdbCard(resolved.ids, resolved.meta, movie);
+        return resolveMovieStrict(movie).then(function (resolved) {
+          return fetchTmdbCardStrict(resolved.ids, resolved.meta, movie);
         }).then(function (card) {
           if (card && card.id) items.push(card);
         }).catch(function (error) {
@@ -348,6 +348,20 @@
     });
   }
 
+  function resolveMovieStrict(movie) {
+    var ids = normalizeMovieIds(movie);
+    if (!ids.kinopoiskId && !ids.tmdbId) return Promise.resolve({ ids: ids, ratings: null, meta: normalizeMovieMeta(movie) });
+
+    var query = ids.kinopoiskId ? '?kp=' + encodeURIComponent(ids.kinopoiskId) : '?tmdb=' + encodeURIComponent(ids.tmdbId);
+    return resolveMovieByQuery(query, ids, movieKey(ids)).then(function (resolved) {
+      resolved.meta = mergeMeta(normalizeMovieMeta(movie), resolved.meta);
+      return resolved;
+    }).catch(function (error) {
+      console.log('Kinopoisk Bookmarks', 'strict resolve failed', movie, error);
+      return { ids: ids, ratings: null, meta: normalizeMovieMeta(movie) };
+    });
+  }
+
   function movieTitle(movie) {
     return movie && (movie.title || movie.name || movie.original_title || movie.original_name || '');
   }
@@ -377,12 +391,20 @@
     });
   }
 
+  function fetchTmdbCardStrict(ids, meta, sourceMovie) {
+    if (!ids.tmdbId) return Promise.resolve(buildMinimalFavoriteCard(ids, meta, sourceMovie, meta && meta.type));
+    return fetchTmdbCard(ids, meta, sourceMovie);
+  }
+
   function buildMinimalFavoriteCard(ids, meta, sourceMovie, type) {
     var id = Number(ids.tmdbId || ids.kinopoiskId);
     if (!id) return null;
 
-    var title = (sourceMovie && (sourceMovie.title || sourceMovie.name)) || (meta && meta.title) || '';
-    var original = (sourceMovie && (sourceMovie.original_title || sourceMovie.original_name)) || (meta && meta.original_title) || title;
+    meta = mergeMeta(normalizeMovieMeta(sourceMovie), meta);
+    type = type || (meta && meta.type) || 'movie';
+
+    var title = (meta && meta.title) || '';
+    var original = (meta && meta.original_title) || title;
     var card = {
       id: id,
       source: 'tmdb',
@@ -390,6 +412,8 @@
       vote_average: 0,
       overview: (meta && meta.description) || '',
       poster_path: (meta && meta.poster) || '',
+      poster: (meta && meta.poster) || '',
+      img: (meta && meta.poster) || '',
       release_date: meta && meta.year ? String(meta.year) + '-01-01' : ''
     };
 
@@ -403,6 +427,31 @@
     }
 
     return card;
+  }
+
+  function normalizeMovieMeta(movie) {
+    movie = movie || {};
+    return {
+      type: movie.name && !movie.title ? 'tv' : (movie.type || 'movie'),
+      title: movie.title || movie.name || movie.original_title || movie.original_name || '',
+      original_title: movie.original_title || movie.original_name || movie.title || movie.name || '',
+      year: movie.year || movie.productionYear || movieYear(movie) || null,
+      poster: movie.poster || movie.poster_path || '',
+      description: movie.description || movie.overview || ''
+    };
+  }
+
+  function mergeMeta(primary, fallback) {
+    primary = primary || {};
+    fallback = fallback || {};
+    return {
+      type: primary.type || fallback.type || 'movie',
+      title: primary.title || fallback.title || '',
+      original_title: primary.original_title || fallback.original_title || '',
+      year: primary.year || fallback.year || null,
+      poster: primary.poster || fallback.poster || '',
+      description: primary.description || fallback.description || ''
+    };
   }
 
   function upsertWatchLaterItem(card) {
