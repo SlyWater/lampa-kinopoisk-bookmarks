@@ -119,6 +119,41 @@ https://lampa-kp.slywater.ru
 - `deploy/lampa-kp.service.example`
 - `deploy/nginx-lampa-kp.conf.example`
 
+## Автодеплой backend на сервер
+
+В репозитории есть GitHub Actions workflow `.github/workflows/deploy-server.yml`. Он запускается при push в `main`, если изменились `worker/**`, `deploy/**`, `package.json` или сам workflow.
+
+Нужно добавить в `Settings -> Secrets and variables -> Actions -> Repository secrets`:
+
+```text
+SERVER_HOST=your.server.ip.or.domain
+SERVER_USER=deploy
+SERVER_SSH_KEY=<private ssh key>
+```
+
+Опционально:
+
+```text
+SERVER_PORT=22
+SERVER_APP_DIR=/opt/lampa-kinopoisk-bookmarks
+SERVER_SERVICE=lampa-kp
+```
+
+На сервере пользователь `SERVER_USER` должен иметь доступ к репозиторию и право выполнять:
+
+```bash
+sudo systemctl restart lampa-kp
+sudo systemctl is-active --quiet lampa-kp
+```
+
+Для этого можно добавить sudoers-правило через `sudo visudo`:
+
+```text
+deploy ALL=(root) NOPASSWD: /bin/systemctl restart lampa-kp, /bin/systemctl is-active --quiet lampa-kp
+```
+
+Workflow использует `git pull --ff-only origin main`, поэтому не затирает ручные изменения на сервере. Если рабочая копия на сервере грязная или история разошлась, деплой упадёт и покажет ошибку в Actions.
+
 ## Установка плагина в Lampa
 
 1. Опубликуйте `plugin/kinopoisk-bookmarks.js` по HTTPS.
