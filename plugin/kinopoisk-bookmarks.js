@@ -13,6 +13,7 @@
     tokenExpires: 'kp_bookmarks_token_expires',
     index: 'kp_bookmarks_index',
     watchLaterItems: 'kp_bookmarks_watch_later_items',
+    lastSync: 'kp_bookmarks_last_sync',
     ratings: 'kp_bookmarks_ratings',
     deviceId: 'kp_bookmarks_device_id'
   };
@@ -44,6 +45,21 @@
 
   function setWatchLaterItems(items) {
     Lampa.Storage.set(STORAGE.watchLaterItems, items || []);
+  }
+
+  function getLastSync() {
+    return Lampa.Storage.get(STORAGE.lastSync, {});
+  }
+
+  function setLastSync(data) {
+    Lampa.Storage.set(STORAGE.lastSync, {
+      time: new Date().toISOString(),
+      remoteCount: Number(data.remoteCount || 0),
+      builtCount: Number(data.builtCount || 0),
+      cacheCount: Number(data.cacheCount || 0),
+      error: data.error || '',
+      sample: data.sample || []
+    });
   }
 
   function normalizeStoredArray(value) {
@@ -236,10 +252,24 @@
       setIndex(index);
       return buildWatchLaterItems(data.movies || [], showNotice).then(function (items) {
         setWatchLaterItems(items);
+        setLastSync({
+          remoteCount: (data.movies || []).length,
+          builtCount: items.length,
+          cacheCount: items.length,
+          sample: items.slice(0, 3).map(function (item) {
+            return item.title || item.name || item.original_title || item.original_name || String(item.id);
+          })
+        });
         if (showNotice) Lampa.Noty.show('Буду смотреть обновлено: ' + items.length);
         return index;
       });
     }).catch(function (error) {
+      setLastSync({
+        remoteCount: 0,
+        builtCount: 0,
+        cacheCount: getWatchLaterItems().length,
+        error: error.message || String(error)
+      });
       if (showNotice) Lampa.Noty.show('Не удалось синхронизировать закладки');
       console.log('Kinopoisk Bookmarks', error);
     });
@@ -604,6 +634,13 @@
 
     Lampa.SettingsApi.addParam({
       component: 'kp_bookmarks',
+      param: { type: 'button', name: 'kp_bookmarks_diagnostics' },
+      field: { name: 'Диагностика' },
+      onChange: showDiagnostics
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: 'kp_bookmarks',
       param: { type: 'button', name: 'kp_bookmarks_clear' },
       field: { name: 'Очистить локальный кэш' },
       onChange: function () {
@@ -621,6 +658,57 @@
       title: 'Буду смотреть',
       component: 'kp_bookmarks_watch_later',
       page: 1
+    });
+  }
+
+  function showDiagnostics() {
+    var auth = Lampa.Storage.get(STORAGE.accessToken, '') ? 'да' : 'нет';
+    var last = getLastSync();
+    var cache = getWatchLaterItems();
+    var lines = [
+      'Proxy: ' + getProxyUrl(),
+      'Авторизация: ' + auth,
+      'Кэш Буду смотреть: ' + cache.length,
+      'Последняя синхронизация: ' + (last.time || 'нет'),
+      'Фильмов от Кинопоиска: ' + (last.remoteCount || 0),
+      'Собрано карточек Lampa: ' + (last.builtCount || 0)
+    ];
+
+    if (last.sample && last.sample.length) lines.push('Примеры: ' + last.sample.join(', '));
+    if (last.error) lines.push('Ошибка: ' + last.error);
+
+    ensureToken().then(function () {
+      return api('/bookmarks/list', { auth: true });
+    }).then(function (data) {
+      lines.push('Проверка сейчас: Кинопоиск вернул ' + ((data.movies || []).length) + ' фильмов');
+      openDiagnosticsModal(lines);
+    }).catch(function (error) {
+      lines.push('Проверка сейчас: ошибка ' + (error.message || String(error)));
+      openDiagnosticsModal(lines);
+    });
+  }
+
+  function openDiagnosticsModal(lines) {
+    Lampa.Modal.open({
+      title: 'Диагностика',
+      html: $('<div class="about" style="text-align:left;white-space:pre-wrap">' + escapeHtml(lines.join('\n')) + '</div>'),
+      size: 'medium',
+      onBack: function () {
+        Lampa.Modal.close();
+        Lampa.Controller.toggle('settings_component');
+      }
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (char) {
+      return ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[char];
     });
   }
 
