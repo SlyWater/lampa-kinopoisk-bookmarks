@@ -193,6 +193,88 @@ test('GET /bookmarks/list can enrich movies into functional TMDB cards', async (
   assert.equal(data.diagnostics.cardsCount, 1);
 });
 
+test('GET /bookmarks/list can enrich via IMDb when Alloha has no TMDB id', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 1,
+                    items: [{ movie: { id: 501, title: { localized: 'Movie', original: 'Movie' }, productionYear: 2026 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      if (text.includes('api.alloha.tv')) {
+        return jsonResponse({ status: 'success', data: { id_kp: 501, id_imdb: 'tt501', category: 1, original_name: 'Movie', year: 2026 } });
+      }
+      if (text.includes('tmdb.cub.red/3/find/tt501')) {
+        return jsonResponse({ movie_results: [{ id: 777, title: 'Movie', original_title: 'Movie', release_date: '2026-05-01' }] });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+    headers: { authorization: 'Bearer imdb-token' }
+  }));
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.cards[0].id, 777);
+  assert.equal(data.cards[0].kinopoisk_id, '501');
+  assert.equal(data.diagnostics.fallbackCardsCount, 0);
+});
+
+test('GET /bookmarks/list keeps Kinopoisk fallback cards when TMDB cannot be resolved', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 1,
+                    items: [{ movie: { id: 502, title: { localized: 'Lost Movie', original: 'Lost Movie' }, productionYear: 2026, poster: { avatarsUrl: '//avatars.mds.yandex.net/lost' } } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      if (text.includes('api.alloha.tv')) return jsonResponse({ status: 'error' });
+      if (text.includes('tmdb.cub.red/3/search/movie')) return jsonResponse({ results: [] });
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+    headers: { authorization: 'Bearer fallback-token' }
+  }));
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.cards.length, 1);
+  assert.equal(data.cards[0].kp_bookmarks_fallback, true);
+  assert.equal(data.cards[0].kinopoisk_id, '502');
+  assert.equal(data.diagnostics.fallbackCardsCount, 1);
+  assert.equal(data.diagnostics.unresolvedCount, 0);
+});
+
 test('GET /bookmarks/list paginates Apps Script results', async () => {
   const seen = [];
   const handler = createWorkerHandler({

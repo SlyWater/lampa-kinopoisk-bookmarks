@@ -49,6 +49,7 @@
 
   function setWatchLaterItems(items) {
     Lampa.Storage.set(STORAGE.watchLaterItems, dedupeWatchLaterItems(items || []));
+    scheduleBookmarksFolderEntry();
   }
 
   function getLastSync() {
@@ -724,6 +725,7 @@
     var details = [];
     if (total) details.push('Обработано: ' + processed + ' из ' + total);
     if (status.cardsCount !== undefined) details.push('Карточек: ' + Number(status.cardsCount || 0));
+    if (status.fallbackCardsCount !== undefined) details.push('Fallback: ' + Number(status.fallbackCardsCount || 0));
     if (status.unresolvedCount !== undefined) details.push('Не сопоставлено: ' + Number(status.unresolvedCount || 0));
     if (status.error) details.push('Ошибка: ' + status.error);
     $('.kp-bookmarks-sync-progress-details').html(escapeHtml(details.join('\n')));
@@ -740,7 +742,7 @@
 
   function injectStyle() {
     if ($('#kp-bookmarks-style').length) return;
-    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:9em;height:9em;max-width:38vw;max-height:38vw;margin:.75em auto .5em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;margin:.55em auto .25em;font-size:1.55em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}.kp-bookmarks-sync-progress{text-align:left}.kp-bookmarks-sync-progress-title{font-size:1.05em;margin-bottom:.8em}.kp-bookmarks-sync-progress-bar{height:.55em;background:rgba(255,255,255,.18);border-radius:.35em;overflow:hidden;margin-bottom:.55em}.kp-bookmarks-sync-progress-fill{width:0;height:100%;background:#f0c14b;border-radius:.35em;transition:width .25s ease}.kp-bookmarks-sync-progress-numbers{font-size:.95em;margin-bottom:.6em}.kp-bookmarks-sync-progress-details{white-space:pre-wrap;opacity:.82;font-size:.86em;line-height:1.35}</style>');
+    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:9em;height:9em;max-width:38vw;max-height:38vw;margin:.75em auto .5em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;margin:.55em auto .25em;font-size:1.55em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}.kp-bookmarks-sync-progress{text-align:left}.kp-bookmarks-sync-progress-title{font-size:1.05em;margin-bottom:.8em}.kp-bookmarks-sync-progress-bar{height:.55em;background:rgba(255,255,255,.18);border-radius:.35em;overflow:hidden;margin-bottom:.55em}.kp-bookmarks-sync-progress-fill{width:0;height:100%;background:#f0c14b;border-radius:.35em;transition:width .25s ease}.kp-bookmarks-sync-progress-numbers{font-size:.95em;margin-bottom:.6em}.kp-bookmarks-sync-progress-details{white-space:pre-wrap;opacity:.82;font-size:.86em;line-height:1.35}.kp-bookmarks-folder-empty{display:flex;align-items:center;justify-content:center;height:100%;opacity:.72}.kp-bookmarks-folder-empty svg{width:42%;height:42%}</style>');
   }
 
   function renderRatingBadges(container, ratings) {
@@ -891,6 +893,7 @@
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
       if (diagnostics.cardsCount !== undefined) lines.push('backend cardsCount: ' + diagnostics.cardsCount);
+      if (diagnostics.fallbackCardsCount !== undefined) lines.push('backend fallbackCardsCount: ' + diagnostics.fallbackCardsCount);
       if (diagnostics.duplicateMoviesCount !== undefined) lines.push('backend duplicateMoviesCount: ' + diagnostics.duplicateMoviesCount);
       if (diagnostics.duplicateCardsCount !== undefined) lines.push('backend duplicateCardsCount: ' + diagnostics.duplicateCardsCount);
       if (diagnostics.cacheHit !== undefined) lines.push('backend cacheHit: ' + diagnostics.cacheHit);
@@ -950,6 +953,63 @@
     list.append(button);
   }
 
+  function addBookmarksFolderEntry() {
+    if ($('.kp-bookmarks-folder-entry').length) {
+      updateBookmarksFolderEntry($('.kp-bookmarks-folder-entry'));
+      return;
+    }
+
+    var source = $('.bookmarks-folder').filter(function () {
+      var title = $(this).find('.bookmarks-folder__title').text().trim();
+      return /^(Позже|Later)$/i.test(title);
+    }).eq(0);
+
+    if (!source.length) source = $('.bookmarks-folder').eq(0);
+    if (!source.length) return;
+
+    var folder = source.clone(false);
+    folder.addClass('kp-bookmarks-folder-entry');
+    folder.removeClass('focus hover');
+    folder.removeAttr('data-json data-id data-index');
+    updateBookmarksFolderEntry(folder);
+    folder.on('hover:enter click', openWatchLater);
+    source.after(folder);
+  }
+
+  function updateBookmarksFolderEntry(folder) {
+    var items = getWatchLaterItems();
+    folder.find('.bookmarks-folder__title').text('Буду смотреть');
+    folder.find('.bookmarks-folder__num').text(items.length);
+    var body = folder.find('.bookmarks-folder__body');
+    body.empty();
+
+    items.filter(function (item) {
+      return item.poster_path || item.poster || item.img;
+    }).slice(0, 3).forEach(function (item, index) {
+      body.append('<img class="card__img i-' + index + '" src="' + escapeHtml(posterUrl(item)) + '">');
+    });
+
+    if (!body.children().length) body.append('<div class="kp-bookmarks-folder-empty">' + ICON + '</div>');
+  }
+
+  function posterUrl(item) {
+    var poster = item.poster_path || item.poster || item.img || '';
+    if (!poster) return './img/img_load.svg';
+    if (poster.indexOf('http') === 0) return poster;
+    if (poster.indexOf('//') === 0) return 'https:' + poster;
+    if (poster.charAt(0) === '/') return 'https://image.tmdb.org/t/p/w342' + poster;
+    return poster;
+  }
+
+  function scheduleBookmarksFolderEntry() {
+    var attempts = 0;
+    var timer = setInterval(function () {
+      addBookmarksFolderEntry();
+      attempts++;
+      if ($('.kp-bookmarks-folder-entry').length || attempts >= 12) clearInterval(timer);
+    }, 500);
+  }
+
   function scheduleMenuItem() {
     var attempts = 0;
     var timer = setInterval(function () {
@@ -994,17 +1054,23 @@
 
     Lampa.Listener.follow('activity', function () {
       setTimeout(patchVisibleCards, 700);
+      scheduleBookmarksFolderEntry();
     });
 
     if (window.appready) scheduleMenuItem();
     else {
       Lampa.Listener.follow('app', function (event) {
-        if (event.type === 'ready') scheduleMenuItem();
+        if (event.type === 'ready') {
+          scheduleMenuItem();
+          scheduleBookmarksFolderEntry();
+        }
       });
     }
+    scheduleBookmarksFolderEntry();
 
     Lampa.Listener.follow('activity', function () {
       scheduleMenuItem();
+      scheduleBookmarksFolderEntry();
     });
 
     setInterval(patchVisibleCards, 3000);

@@ -236,6 +236,7 @@ async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProg
 
   const cardResult = enrich ? await buildLampaCards(fetchImpl, env, movies, onProgress) : { cards: [], unresolved: [] };
   diagnostics.cardsCount = cardResult.cards.length;
+  diagnostics.fallbackCardsCount = cardResult.fallbacks || 0;
   diagnostics.duplicateCardsCount = cardResult.duplicates || 0;
   diagnostics.unresolvedCount = cardResult.unresolved.length;
   diagnostics.unresolved = cardResult.unresolved.slice(0, 20);
@@ -360,6 +361,7 @@ async function resolveAlloha(fetchImpl, env, query) {
 async function buildLampaCards(fetchImpl, env, movies, onProgress) {
   const cardsByIndex = new Array(movies.length);
   const unresolved = [];
+  let fallbackCardsCount = 0;
   let nextIndex = 0;
   let processed = 0;
   const concurrency = Math.min(
@@ -373,7 +375,10 @@ async function buildLampaCards(fetchImpl, env, movies, onProgress) {
       const movie = movies[currentIndex];
       try {
         const card = await buildLampaCard(fetchImpl, env, movie);
-        if (card) cardsByIndex[currentIndex] = card;
+        if (card) {
+          cardsByIndex[currentIndex] = card;
+          if (card.kp_bookmarks_fallback) fallbackCardsCount += 1;
+        }
         else unresolved.push({
           kinopoisk_id: movie.kinopoisk_id,
           title: movie.title,
@@ -395,6 +400,7 @@ async function buildLampaCards(fetchImpl, env, movies, onProgress) {
             processed,
             total: movies.length,
             cardsCount: cardsByIndex.filter(Boolean).length,
+            fallbackCardsCount,
             unresolvedCount: unresolved.length
           });
         }
@@ -404,18 +410,21 @@ async function buildLampaCards(fetchImpl, env, movies, onProgress) {
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   const deduped = dedupeLampaCards(cardsByIndex.filter(Boolean));
-  return { cards: deduped.items, unresolved, duplicates: deduped.duplicates };
+  return { cards: deduped.items, unresolved, duplicates: deduped.duplicates, fallbacks: fallbackCardsCount };
 }
 
 async function buildLampaCard(fetchImpl, env, movie) {
   const resolved = await resolveAlloha(fetchImpl, env, `kp=${encodeURIComponent(movie.kinopoisk_id)}`);
   const alloha = resolved?.data || {};
   const tmdbId = alloha.id_tmdb;
+  const imdbId = alloha.id_imdb || movie.imdb_id || movie.imdbId;
   const type = alloha.category === 2 ? 'tv' : 'movie';
   let card = null;
 
   if (tmdbId) card = await fetchTmdb(fetchImpl, env, type, tmdbId);
+  if (!card && imdbId) card = await fetchTmdbByImdb(fetchImpl, env, imdbId, movie, alloha);
   if (!card) card = await strictTmdbSearch(fetchImpl, env, movie, alloha);
+  if (!card) card = buildKinopoiskFallbackCard(movie, alloha);
   if (!card) return null;
 
   card.source = 'tmdb';
@@ -432,20 +441,44 @@ async function fetchTmdb(fetchImpl, env, type, tmdbId) {
   return data;
 }
 
+async function fetchTmdbByImdb(fetchImpl, env, imdbId, movie, alloha) {
+  const domain = env.TMDB_PROXY_DOMAIN || 'cub.red';
+  const url = `https://tmdb.${domain}/3/find/${encodeURIComponent(imdbId)}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=ru`;
+  const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
+  if (data?.error) return null;
+
+  const candidates = [
+    ...(Array.isArray(data?.movie_results) ? data.movie_results.map((card) => ({ card, type: 'movie' })) : []),
+    ...(Array.isArray(data?.tv_results) ? data.tv_results.map((card) => ({ card, type: 'tv' })) : [])
+  ];
+  const year = alloha.year || movie.year;
+  const preferred = candidates.find((candidate) => isStrictTmdbMatch(candidate.card, movie, alloha, candidate.type, year)) || candidates[0];
+  return preferred?.card || null;
+}
+
 async function strictTmdbSearch(fetchImpl, env, movie, alloha) {
   const type = alloha.category === 2 ? 'tv' : 'movie';
-  const title = alloha.original_name || movie.original_title || movie.title;
   const year = alloha.year || movie.year;
-  if (!title || !year) return null;
+  const titles = uniqueTruthy([
+    alloha.original_name,
+    alloha.name,
+    movie.original_title,
+    movie.title
+  ]);
+  if (!titles.length || !year) return null;
 
   const domain = env.TMDB_PROXY_DOMAIN || 'cub.red';
   const path = type === 'tv' ? 'search/tv' : 'search/movie';
   const yearParam = type === 'tv' ? 'first_air_date_year' : 'year';
-  const url = `https://tmdb.${domain}/3/${path}?query=${encodeURIComponent(title)}&api_key=${TMDB_API_KEY}&${yearParam}=${encodeURIComponent(year)}&language=ru`;
-  const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
-  const results = Array.isArray(data?.results) ? data.results : [];
-  const matched = results.find((candidate) => isStrictTmdbMatch(candidate, movie, alloha, type, year));
-  return matched || null;
+  for (const title of titles) {
+    const url = `https://tmdb.${domain}/3/${path}?query=${encodeURIComponent(title)}&api_key=${TMDB_API_KEY}&${yearParam}=${encodeURIComponent(year)}&language=ru`;
+    const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const matched = results.find((candidate) => isStrictTmdbMatch(candidate, movie, alloha, type, year));
+    if (matched) return matched;
+  }
+
+  return null;
 }
 
 function isStrictTmdbMatch(candidate, movie, alloha, type, year) {
@@ -464,8 +497,36 @@ function isStrictTmdbMatch(candidate, movie, alloha, type, year) {
   return candidateTitles.includes(expected) || candidateTitles.includes(localized);
 }
 
+function buildKinopoiskFallbackCard(movie, alloha) {
+  const id = Number(movie.kinopoisk_id);
+  if (!id) return null;
+
+  const title = alloha.name || movie.title || movie.original_title || `Kinopoisk ${movie.kinopoisk_id}`;
+  const original = alloha.original_name || movie.original_title || title;
+  const poster = alloha.poster || movie.poster || '';
+  const year = alloha.year || movie.year || '';
+
+  return {
+    id: 900000000 + id,
+    source: 'tmdb',
+    title,
+    original_title: original,
+    release_date: year ? `${year}-01-01` : '',
+    vote_average: 0,
+    poster_path: poster,
+    poster,
+    img: poster,
+    overview: alloha.description || '',
+    kp_bookmarks_fallback: true
+  };
+}
+
 function normalizeTitle(title) {
   return String(title || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/gi, ' ').trim();
+}
+
+function uniqueTruthy(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
 async function upstreamJson(fetchImpl, url, options) {
@@ -643,6 +704,7 @@ function publicBookmarkJob(job) {
     total: Number(job.total || 0),
     moviesCount: Number(job.moviesCount || 0),
     cardsCount: Number(job.cardsCount || 0),
+    fallbackCardsCount: Number(job.fallbackCardsCount || 0),
     unresolvedCount: Number(job.unresolvedCount || 0),
     percent: job.total ? Math.min(100, Math.round((Number(job.processed || 0) / Number(job.total)) * 100)) : 0,
     error: job.error || '',
@@ -659,6 +721,7 @@ function doneProgress(data) {
     total,
     moviesCount: total,
     cardsCount: (data.cards || []).length,
+    fallbackCardsCount: data.diagnostics?.fallbackCardsCount || 0,
     unresolvedCount: data.diagnostics?.unresolvedCount || 0
   };
 }
