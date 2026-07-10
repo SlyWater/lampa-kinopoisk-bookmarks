@@ -314,6 +314,52 @@ test('GET /bookmarks/list paginates Apps Script results', async () => {
   const data = await response.json();
   assert.deepEqual(seen, [0, 50]);
   assert.equal(data.movies.length, 2);
+  assert.equal(data.diagnostics.pagination.supported, true);
+  assert.equal(data.diagnostics.pagination.param, 'offset');
+});
+
+test('GET /bookmarks/list reports unsupported Apps Script pagination', async () => {
+  const seen = [];
+  const firstItems = Array.from({ length: 50 }, (_, index) => ({
+    movie: { id: index + 1, title: { localized: `Movie ${index + 1}` }, productionYear: 2026 }
+  }));
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        const params = new URL(text).searchParams;
+        seen.push(Object.fromEntries(params));
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 341,
+                    items: firstItems
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer no-pagination-token' }
+  }));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.equal(data.movies.length, 50);
+  assert.equal(data.diagnostics.total, 341);
+  assert.equal(data.diagnostics.pagination.supported, false);
+  assert.equal(data.diagnostics.pagination.requestedPages, 5);
+  assert.equal(seen.length, 5);
 });
 
 test('GET /bookmarks/list caches enriched payload and refresh bypasses cache', async () => {

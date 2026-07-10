@@ -323,32 +323,86 @@ async function kinopoiskGraphql(fetchImpl, env, token, query, variables) {
 async function kinopoiskAppsScriptList(fetchImpl, env, token, full = true) {
   const endpoint = env.KINOPOISK_APPS_SCRIPT_LIST_URL || DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL;
   const collectedItems = [];
-  let firstData = null;
-  let lastData = null;
-  let offset = 0;
   const limit = Number(env.KINOPOISK_APPS_SCRIPT_PAGE_SIZE || 50);
   const maxItems = Number(env.KINOPOISK_MAX_IMPORT || 500);
+  const firstData = await kinopoiskAppsScriptPage(fetchImpl, endpoint, token, { offset: 0, limit });
+  const firstItems = extractWatchLaterItems(firstData);
+  const total = firstData?.data?.userProfile?.userData?.plannedToWatch?.movies?.total || firstItems.length;
+  const pagination = {
+    supported: false,
+    param: '',
+    requestedPages: 1,
+    uniquePages: firstItems.length ? 1 : 0,
+    total
+  };
 
-  do {
-    const separator = endpoint.includes('?') ? '&' : '?';
-    const pageData = await upstreamJson(fetchImpl, `${endpoint}${separator}oauth=${encodeURIComponent(token)}&offset=${offset}`, {
-      method: 'GET'
-    });
-    if (!firstData) firstData = pageData;
-    lastData = pageData;
+  collectedItems.push(...firstItems);
 
-    const pageItems = extractWatchLaterItems(pageData);
-    collectedItems.push(...pageItems);
+  if (full && firstItems.length && firstItems.length < total && collectedItems.length < maxItems) {
+    const detected = await detectAppsScriptPagination(fetchImpl, endpoint, token, firstItems, limit);
+    if (detected) {
+      pagination.supported = true;
+      pagination.param = detected.param;
+      collectedItems.push(...detected.items);
+      pagination.requestedPages += detected.requestedPages;
+      pagination.uniquePages += 1;
 
-    const total = pageData?.data?.userProfile?.userData?.plannedToWatch?.movies?.total || collectedItems.length;
-    offset += limit;
-    if (!full || !pageItems.length || collectedItems.length >= total || collectedItems.length >= maxItems) break;
-  } while (true);
+      let page = 2;
+      while (collectedItems.length < total && collectedItems.length < maxItems) {
+        const pageData = await kinopoiskAppsScriptPage(fetchImpl, endpoint, token, pageParams(detected.param, page, limit));
+        pagination.requestedPages += 1;
+        const pageItems = extractWatchLaterItems(pageData);
+        if (!pageItems.length || pageHasOnlyKnownItems(pageItems, collectedItems)) break;
+        pagination.uniquePages += 1;
+        collectedItems.push(...pageItems);
+        page += 1;
+      }
+    } else {
+      pagination.requestedPages += 4;
+    }
+  }
 
-  const result = firstData || lastData || {};
+  const result = firstData || {};
   const planned = result?.data?.userProfile?.userData?.plannedToWatch?.movies;
   if (planned) planned.items = collectedItems;
+  result._kpPagination = pagination;
   return result;
+}
+
+async function detectAppsScriptPagination(fetchImpl, endpoint, token, firstItems, limit) {
+  const variants = ['offset', 'skip', 'page', 'start'];
+
+  for (const param of variants) {
+    const pageData = await kinopoiskAppsScriptPage(fetchImpl, endpoint, token, pageParams(param, 1, limit));
+    const pageItems = extractWatchLaterItems(pageData);
+    if (pageItems.length && !pageHasOnlyKnownItems(pageItems, firstItems)) {
+      return { param, items: pageItems, requestedPages: 1 };
+    }
+  }
+
+  return null;
+}
+
+async function kinopoiskAppsScriptPage(fetchImpl, endpoint, token, params) {
+  const separator = endpoint.includes('?') ? '&' : '?';
+  const query = new URLSearchParams({ oauth: token });
+  Object.entries(params || {}).forEach(([key, value]) => query.set(key, String(value)));
+  return upstreamJson(fetchImpl, `${endpoint}${separator}${query.toString()}`, {
+    method: 'GET'
+  });
+}
+
+function pageParams(param, page, limit) {
+  if (param === 'page') return { page: page + 1, limit };
+  if (param === 'offset') return { offset: page * limit, limit };
+  if (param === 'skip') return { skip: page * limit, limit };
+  if (param === 'start') return { start: page * limit, limit };
+  return { offset: page * limit, limit };
+}
+
+function pageHasOnlyKnownItems(pageItems, knownItems) {
+  const known = new Set(knownItems.map((item) => String(item?.movie?.id || item?.item?.id || item?.id || '')).filter(Boolean));
+  return pageItems.every((item) => known.has(String(item?.movie?.id || item?.item?.id || item?.id || '')));
 }
 
 async function resolveAlloha(fetchImpl, env, query) {
@@ -457,7 +511,6 @@ async function fetchTmdbByImdb(fetchImpl, env, imdbId, movie, alloha) {
 }
 
 async function strictTmdbSearch(fetchImpl, env, movie, alloha) {
-  const type = alloha.category === 2 ? 'tv' : 'movie';
   const year = alloha.year || movie.year;
   const titles = uniqueTruthy([
     alloha.original_name,
@@ -467,22 +520,34 @@ async function strictTmdbSearch(fetchImpl, env, movie, alloha) {
   ]);
   if (!titles.length || !year) return null;
 
+  const types = alloha.category === 2 ? ['tv'] : alloha.category === 1 ? ['movie'] : ['movie', 'tv'];
   const domain = env.TMDB_PROXY_DOMAIN || 'cub.red';
-  const path = type === 'tv' ? 'search/tv' : 'search/movie';
-  const yearParam = type === 'tv' ? 'first_air_date_year' : 'year';
-  for (const title of titles) {
-    const url = `https://tmdb.${domain}/3/${path}?query=${encodeURIComponent(title)}&api_key=${TMDB_API_KEY}&${yearParam}=${encodeURIComponent(year)}&language=ru`;
-    const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
-    const results = Array.isArray(data?.results) ? data.results : [];
-    const matched = results.find((candidate) => isStrictTmdbMatch(candidate, movie, alloha, type, year));
-    if (matched) return matched;
+  let bestYearMatch = null;
+
+  for (const type of types) {
+    const path = type === 'tv' ? 'search/tv' : 'search/movie';
+    const yearParam = type === 'tv' ? 'first_air_date_year' : 'year';
+
+    for (const title of titles) {
+      const url = `https://tmdb.${domain}/3/${path}?query=${encodeURIComponent(title)}&api_key=${TMDB_API_KEY}&${yearParam}=${encodeURIComponent(year)}&language=ru`;
+      let data;
+      try {
+        data = await upstreamJson(fetchImpl, url, { method: 'GET' });
+      } catch {
+        continue;
+      }
+      const results = Array.isArray(data?.results) ? data.results : [];
+      const matched = results.find((candidate) => isStrictTmdbMatch(candidate, movie, alloha, type, year));
+      if (matched) return matched;
+      if (!bestYearMatch) bestYearMatch = results.find((candidate) => tmdbCandidateYear(candidate, type) === String(year));
+    }
   }
 
-  return null;
+  return bestYearMatch || null;
 }
 
 function isStrictTmdbMatch(candidate, movie, alloha, type, year) {
-  const candidateYear = String((type === 'tv' ? candidate.first_air_date : candidate.release_date) || '').slice(0, 4);
+  const candidateYear = tmdbCandidateYear(candidate, type);
   if (candidateYear && String(year) !== candidateYear) return false;
 
   const expected = normalizeTitle(alloha.original_name || movie.original_title || movie.title);
@@ -495,6 +560,10 @@ function isStrictTmdbMatch(candidate, movie, alloha, type, year) {
   ].map(normalizeTitle).filter(Boolean);
 
   return candidateTitles.includes(expected) || candidateTitles.includes(localized);
+}
+
+function tmdbCandidateYear(candidate, type) {
+  return String((type === 'tv' ? candidate.first_air_date : candidate.release_date) || '').slice(0, 4);
 }
 
 function buildKinopoiskFallbackCard(movie, alloha) {
@@ -656,6 +725,7 @@ function buildBookmarksDiagnostics(data, movies, source) {
     total: plannedMovies?.total ?? null,
     rawItemsCount: Array.isArray(plannedMovies?.items) ? plannedMovies.items.length : null,
     parsedMoviesCount: movies.length,
+    pagination: data?._kpPagination || null,
     topLevelError: data?.error || '',
     upstreamStatus: data?.status || null,
     errors: Array.isArray(data?.errors) ? data.errors.map((error) => ({

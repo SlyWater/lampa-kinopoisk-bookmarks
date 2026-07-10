@@ -141,6 +141,8 @@ https://lampa-kp-bookmarks.example.workers.dev
 
 Backend собирает функциональные карточки по прямому `id_tmdb`, затем через IMDb `find`, затем через строгий поиск по названию с проверкой года. Если безопасно сопоставить TMDB не удалось, backend оставляет видимую fallback-карточку по данным Кинопоиска; такие карточки отмечены в диагностике как `fallbackCardsCount`.
 
+Для fallback через Apps Script backend пробует определить пагинацию по параметрам `offset`, `skip`, `page` и `start`. Если диагностика показывает `paginationSupported: false`, внешний Apps Script отдаёт только первую страницу, даже если `total` больше 50.
+
 ## Проверки
 
 ```powershell

@@ -892,6 +892,11 @@
       lines.push('hasPlannedToWatch: ' + Boolean(diagnostics.hasPlannedToWatch));
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
+      if (diagnostics.pagination) {
+        lines.push('paginationSupported: ' + Boolean(diagnostics.pagination.supported));
+        if (diagnostics.pagination.param) lines.push('paginationParam: ' + diagnostics.pagination.param);
+        lines.push('paginationPages: ' + (diagnostics.pagination.uniquePages || 0) + '/' + (diagnostics.pagination.requestedPages || 0));
+      }
       if (diagnostics.cardsCount !== undefined) lines.push('backend cardsCount: ' + diagnostics.cardsCount);
       if (diagnostics.fallbackCardsCount !== undefined) lines.push('backend fallbackCardsCount: ' + diagnostics.fallbackCardsCount);
       if (diagnostics.duplicateMoviesCount !== undefined) lines.push('backend duplicateMoviesCount: ' + diagnostics.duplicateMoviesCount);
