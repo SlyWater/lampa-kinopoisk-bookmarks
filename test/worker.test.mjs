@@ -202,6 +202,65 @@ test('GET /bookmarks/list uses Apps Script when direct GraphQL is partial and no
   assert.equal(data.movies.length, 3);
 });
 
+test('browser import can replace partial API watch-later list', async () => {
+  const state = {};
+  const handler = createWorkerHandler({
+    state,
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 1,
+                    items: [{ movie: { id: 1, title: { localized: 'Only API' }, productionYear: 2026 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const started = await handler(new Request('https://worker.test/bookmarks/import/start', {
+    method: 'POST',
+    headers: { authorization: 'Bearer import-token' }
+  }));
+  assert.equal(started.status, 200);
+  const startData = await started.json();
+  assert.match(startData.code, /^[A-Z0-9]{6,8}$/);
+
+  const submitted = await handler(new Request('https://worker.test/bookmarks/import/submit', {
+    method: 'POST',
+    body: JSON.stringify({
+      code: startData.code,
+      movies: [
+        { id: '101', name: 'One', alt_name: 'One (2024)' },
+        { id: '102', name: 'Two', alt_name: 'Two (2025)' },
+        { id: '102', name: 'Two duplicate', alt_name: 'Two (2025)' }
+      ]
+    })
+  }));
+  assert.equal(submitted.status, 200);
+  assert.equal((await submitted.json()).receivedCount, 2);
+
+  const listed = await handler(new Request('https://worker.test/bookmarks/list?enrich=0&refresh=1', {
+    headers: { authorization: 'Bearer import-token' }
+  }));
+  assert.equal(listed.status, 200);
+  const data = await listed.json();
+  assert.equal(data.diagnostics.source, 'browser_import');
+  assert.equal(data.diagnostics.importedCount, 2);
+  assert.deepEqual(data.movies.map((movie) => movie.kinopoisk_id), ['101', '102']);
+});
+
 test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData', async () => {
   let calls = 0;
   const handler = createWorkerHandler({

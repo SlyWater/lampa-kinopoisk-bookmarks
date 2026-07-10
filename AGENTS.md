@@ -20,6 +20,9 @@
 - `GET /bookmarks/list`
 - `POST /bookmarks/sync/start`
 - `GET /bookmarks/sync/status`
+- `POST /bookmarks/import/start`
+- `GET /bookmarks/import/status`
+- `POST /bookmarks/import/submit`
 - `POST /bookmarks/watch-later/set`
 - `POST /bookmarks/watch-later/remove`
 - `GET /ratings/resolve`
@@ -37,3 +40,4 @@
 - Backend enrichment should prefer direct TMDB id, then IMDb `find`, then strict title/year search. If no TMDB card is safe, return a marked Kinopoisk fallback card so the bookmark remains visible.
 - Apps Script fallback pagination is auto-detected across `offset`, `skip`, `page`, and `start`; diagnostics must expose whether pagination is actually supported by the external script.
 - Direct Kinopoisk GraphQL list loading should try pagination variants (`offset`, `skip`, `page`) before falling back to Apps Script. If any upstream returns only part of the list, diagnostics must expose `partialList`, `missingItemsCount`, and a warning.
+- Full Kinopoisk watch-later import can be bootstrapped through `tools/kinopoisk-folder-import.user.js`: Lampa creates a temporary backend import code, the userscript reads the authenticated Kinopoisk folder DOM, submits movie ids, and `/bookmarks/list` prefers this browser import when it is more complete than API/fallback results.

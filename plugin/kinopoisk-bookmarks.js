@@ -830,6 +830,13 @@
 
     Lampa.SettingsApi.addParam({
       component: 'kp_bookmarks',
+      param: { type: 'button', name: 'kp_bookmarks_browser_import' },
+      field: { name: 'Импорт из браузера Кинопоиска' },
+      onChange: startBrowserImport
+    });
+
+    Lampa.SettingsApi.addParam({
+      component: 'kp_bookmarks',
       param: { type: 'button', name: 'kp_bookmarks_open_watch_later' },
       field: { name: 'Открыть Буду смотреть' },
       onChange: openWatchLater
@@ -853,6 +860,54 @@
         Lampa.Storage.set(STORAGE.lastSync, {});
         Lampa.Noty.show('Кэш закладок очищен');
       }
+    });
+  }
+
+  function startBrowserImport() {
+    ensureToken().then(function () {
+      return api('/bookmarks/import/start', { method: 'POST', auth: true });
+    }).then(function (data) {
+      var lines = [
+        'Код импорта: ' + data.code,
+        '',
+        '1. Открой в браузере Кинопоиск:',
+        data.folderUrl || 'https://www.kinopoisk.ru/mykp/folders/3575/?format=mini',
+        '2. Запусти userscript Lampa KP Import.',
+        '3. Введи код импорта.',
+        '4. После отправки нажми здесь OK.'
+      ];
+
+      Lampa.Modal.open({
+        title: 'Импорт Кинопоиска',
+        html: $('<div class="about" style="text-align:left;white-space:pre-wrap">' + escapeHtml(lines.join('\n')) + '</div>'),
+        size: 'medium',
+        onBack: function () {
+          Lampa.Modal.close();
+          Lampa.Controller.toggle('settings_component');
+        },
+        onSelect: function () {
+          checkBrowserImportAndSync();
+        }
+      });
+    }).catch(function (error) {
+      Lampa.Noty.show('Не удалось начать импорт');
+      console.log('Kinopoisk Bookmarks', error);
+    });
+  }
+
+  function checkBrowserImportAndSync() {
+    api('/bookmarks/import/status', { auth: true }).then(function (status) {
+      if (!status.receivedCount) {
+        Lampa.Noty.show('Импорт ещё не получен');
+        return;
+      }
+
+      Lampa.Modal.close();
+      Lampa.Noty.show('Импорт получен: ' + status.receivedCount);
+      syncWatchLater(true);
+    }).catch(function (error) {
+      Lampa.Noty.show('Не удалось проверить импорт');
+      console.log('Kinopoisk Bookmarks', error);
     });
   }
 
@@ -895,6 +950,8 @@
       if (diagnostics.partialList !== undefined) lines.push('partialList: ' + Boolean(diagnostics.partialList));
       if (diagnostics.missingItemsCount) lines.push('missingItemsCount: ' + diagnostics.missingItemsCount);
       if (diagnostics.warning) lines.push('warning: ' + diagnostics.warning);
+      if (diagnostics.importedCount !== undefined) lines.push('importedCount: ' + diagnostics.importedCount);
+      if (diagnostics.importedAt) lines.push('importedAt: ' + diagnostics.importedAt);
       if (diagnostics.pagination) {
         lines.push('paginationSupported: ' + Boolean(diagnostics.pagination.supported));
         if (diagnostics.pagination.param) lines.push('paginationParam: ' + diagnostics.pagination.param);

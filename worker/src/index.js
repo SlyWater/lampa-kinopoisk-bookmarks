@@ -31,6 +31,8 @@ export function createWorkerHandler(deps = {}) {
   state.bookmarksCache = state.bookmarksCache || new Map();
   state.bookmarksInFlight = state.bookmarksInFlight || new Map();
   state.bookmarksJobs = state.bookmarksJobs || new Map();
+  state.importSessions = state.importSessions || new Map();
+  state.importedWatchLater = state.importedWatchLater || new Map();
   state.bookmarksCacheGeneration = state.bookmarksCacheGeneration || 0;
 
   return async function handleRequest(request, env = {}, ctx = {}) {
@@ -46,6 +48,9 @@ export function createWorkerHandler(deps = {}) {
       if (url.pathname === '/bookmarks/list' && request.method === 'GET') return listBookmarks(fetchImpl, env, request, state);
       if (url.pathname === '/bookmarks/sync/start' && request.method === 'POST') return startBookmarksSync(fetchImpl, env, request, state, ctx);
       if (url.pathname === '/bookmarks/sync/status' && request.method === 'GET') return getBookmarksSyncStatus(request, state);
+      if (url.pathname === '/bookmarks/import/start' && request.method === 'POST') return startBrowserImport(env, request, state);
+      if (url.pathname === '/bookmarks/import/status' && request.method === 'GET') return getBrowserImportStatus(request, state);
+      if (url.pathname === '/bookmarks/import/submit' && request.method === 'POST') return submitBrowserImport(request, state);
       if (url.pathname === '/bookmarks/watch-later/set' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'add', state);
       if (url.pathname === '/bookmarks/watch-later/remove' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'remove', state);
       if (url.pathname === '/ratings/resolve' && (request.method === 'GET' || request.method === 'POST')) return resolveRatings(fetchImpl, env, request);
@@ -106,6 +111,7 @@ async function listBookmarks(fetchImpl, env, request, state) {
   const full = url.searchParams.get('full') !== '0';
   const refresh = url.searchParams.get('refresh') === '1';
   const cacheKey = await bookmarksCacheKey(token, { enrich, full });
+  const tokenKey = await sha256Hex(token);
   const cacheTtl = positiveInteger(env.BOOKMARKS_CACHE_TTL_MS, 300000, 1000, 3600000);
   const cacheGeneration = state.bookmarksCacheGeneration;
 
@@ -119,7 +125,7 @@ async function listBookmarks(fetchImpl, env, request, state) {
     return json(withCacheDiagnostics(data, true, true));
   }
 
-  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full);
+  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full, null, getImportedWatchLater(state, tokenKey));
   state.bookmarksInFlight.set(cacheKey, pending);
 
   try {
@@ -146,6 +152,7 @@ async function startBookmarksSync(fetchImpl, env, request, state, ctx) {
   const full = url.searchParams.get('full') !== '0';
   const refresh = url.searchParams.get('refresh') === '1';
   const cacheKey = await bookmarksCacheKey(token, { enrich, full });
+  const tokenKey = await sha256Hex(token);
   const cacheTtl = positiveInteger(env.BOOKMARKS_CACHE_TTL_MS, 300000, 1000, 3600000);
 
   if (!refresh) {
@@ -163,7 +170,7 @@ async function startBookmarksSync(fetchImpl, env, request, state, ctx) {
   const job = createBookmarkJob();
   state.bookmarksJobs.set(job.id, job);
 
-  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full, (progress) => updateBookmarkJob(job, progress))
+  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full, (progress) => updateBookmarkJob(job, progress), getImportedWatchLater(state, tokenKey))
     .then((data) => {
       if (state.bookmarksCacheGeneration === cacheGeneration) {
         state.bookmarksCache.set(cacheKey, {
@@ -201,7 +208,93 @@ function getBookmarksSyncStatus(request, state) {
   return json(publicBookmarkJob(job));
 }
 
-async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProgress) {
+async function startBrowserImport(env, request, state) {
+  const token = getBearerToken(request);
+  if (!token) return json({ error: 'missing_authorization' }, 401);
+
+  cleanupImportSessions(state);
+  const tokenKey = await sha256Hex(token);
+  const now = Date.now();
+  const ttl = positiveInteger(env.BROWSER_IMPORT_TTL_MS, 30 * 60 * 1000, 60000, 6 * 60 * 60 * 1000);
+  const code = createImportCode(state);
+  const session = {
+    code,
+    tokenKey,
+    status: 'waiting',
+    createdAt: now,
+    expiresAt: now + ttl,
+    receivedAt: null,
+    receivedCount: 0,
+    sourceUrl: ''
+  };
+
+  state.importSessions.set(code, session);
+
+  return json({
+    code,
+    status: session.status,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+    submitUrl: `${new URL(request.url).origin}/bookmarks/import/submit`,
+    folderUrl: 'https://www.kinopoisk.ru/mykp/folders/3575/?format=mini'
+  });
+}
+
+async function getBrowserImportStatus(request, state) {
+  const token = getBearerToken(request);
+  if (!token) return json({ error: 'missing_authorization' }, 401);
+
+  cleanupImportSessions(state);
+  const tokenKey = await sha256Hex(token);
+  const session = findLatestImportSession(state, tokenKey);
+  const imported = getImportedWatchLater(state, tokenKey);
+
+  return json({
+    status: session?.status || (imported ? 'done' : 'none'),
+    code: session?.code || '',
+    expiresAt: session ? new Date(session.expiresAt).toISOString() : '',
+    receivedAt: imported?.importedAt || session?.receivedAt || '',
+    receivedCount: imported?.movies?.length || session?.receivedCount || 0,
+    sourceUrl: imported?.sourceUrl || session?.sourceUrl || ''
+  });
+}
+
+async function submitBrowserImport(request, state) {
+  cleanupImportSessions(state);
+  const body = await readJson(request);
+  const code = normalizeImportCode(body.code);
+  const session = state.importSessions.get(code);
+  if (!session) return json({ error: 'invalid_import_code' }, 404);
+  if (session.expiresAt <= Date.now()) {
+    state.importSessions.delete(code);
+    return json({ error: 'import_code_expired' }, 410);
+  }
+
+  const movies = normalizeImportedMovies(body.movies || body.items || []);
+  if (!movies.length) return json({ error: 'empty_import' }, 400);
+
+  const importedAt = new Date().toISOString();
+  state.importedWatchLater.set(session.tokenKey, {
+    movies,
+    importedAt,
+    sourceUrl: String(body.sourceUrl || ''),
+    title: String(body.title || '')
+  });
+
+  session.status = 'done';
+  session.receivedAt = importedAt;
+  session.receivedCount = movies.length;
+  session.sourceUrl = String(body.sourceUrl || '');
+  clearBookmarksCache(state);
+
+  return json({
+    ok: true,
+    status: session.status,
+    receivedCount: movies.length,
+    importedAt
+  });
+}
+
+async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProgress, importedWatchLater = null) {
   if (onProgress) onProgress({ phase: 'list', message: 'Получаю список Кинопоиска', processed: 0, total: 0 });
   let data = await kinopoiskGraphqlWatchLaterList(fetchImpl, env, token, full);
   let items = extractWatchLaterItems(data);
@@ -232,6 +325,21 @@ async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProg
       diagnostics.fallback.duplicateMoviesCount = fallbackMovieDedupe.duplicates;
     }
   }
+
+  if (importedWatchLater?.movies?.length > movies.length) {
+    data = buildImportedWatchLaterData(importedWatchLater);
+    items = extractWatchLaterItems(data);
+    const importedMovieDedupe = dedupeKinopoiskMovies(items.map(normalizeKinopoiskListItem).filter(Boolean));
+    movies = importedMovieDedupe.items;
+    diagnostics = buildBookmarksDiagnostics(data, movies, 'browser_import');
+    diagnostics.duplicateMoviesCount = importedMovieDedupe.duplicates;
+    diagnostics.importedAt = importedWatchLater.importedAt;
+    diagnostics.importedCount = importedWatchLater.movies.length;
+  } else if (importedWatchLater?.movies?.length) {
+    diagnostics.importedAt = importedWatchLater.importedAt;
+    diagnostics.importedCount = importedWatchLater.movies.length;
+  }
+
   if (onProgress) {
     onProgress({
       phase: enrich ? 'cards' : 'done',
@@ -736,6 +844,76 @@ function normalizeKinopoiskListItem(item) {
   };
 }
 
+function normalizeImportedMovies(items) {
+  if (!Array.isArray(items)) return [];
+
+  const seen = new Set();
+  const movies = [];
+  for (const item of items) {
+    const id = String(item?.kinopoisk_id || item?.kinopoiskId || item?.id || '').replace(/\D+/g, '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const title = String(item?.title || item?.name || item?.localized || '').trim();
+    const original = String(item?.original_title || item?.originalTitle || item?.alt_name || item?.alternativeName || title).trim();
+    const year = normalizeImportedYear(item?.year || item?.productionYear || original);
+    movies.push({
+      kinopoisk_id: id,
+      title: title || original || `Kinopoisk ${id}`,
+      original_title: original || title || `Kinopoisk ${id}`,
+      year,
+      poster: String(item?.poster || item?.posterUrl || ''),
+      updatedAt: normalizeImportedDate(item?.updatedAt || item?.date_added || item?.dateAdded)
+    });
+  }
+
+  return movies;
+}
+
+function normalizeImportedYear(value) {
+  const match = String(value || '').match(/\b(19|20)\d{2}\b/);
+  return match ? Number(match[0]) : null;
+}
+
+function normalizeImportedDate(value) {
+  if (!value) return new Date(0).toISOString();
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(0).toISOString();
+}
+
+function buildImportedWatchLaterData(imported) {
+  const movies = Array.isArray(imported?.movies) ? imported.movies : [];
+  return {
+    data: {
+      userProfile: {
+        userData: {
+          plannedToWatch: {
+            movies: {
+              total: movies.length,
+              items: movies.map((movie) => ({
+                createdAt: movie.updatedAt,
+                movie: {
+                  id: movie.kinopoisk_id,
+                  title: {
+                    localized: movie.title,
+                    original: movie.original_title
+                  },
+                  productionYear: movie.year || null,
+                  poster: movie.poster ? { url: movie.poster } : undefined
+                }
+              }))
+            }
+          }
+        }
+      }
+    },
+    _kpImport: {
+      importedAt: imported.importedAt || '',
+      sourceUrl: imported.sourceUrl || ''
+    }
+  };
+}
+
 function normalizeKinopoiskPoster(movie) {
   const candidate = movie.poster?.url || movie.poster?.previewUrl || movie.poster?.avatarsUrl || movie.posterUrl || movie.poster || movie.cover?.url || '';
   if (!candidate || typeof candidate !== 'string') return '';
@@ -953,6 +1131,38 @@ function cloneJson(value) {
 function randomId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createImportCode(state) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const code = Math.random().toString(36).replace(/[^a-z0-9]+/g, '').slice(2, 8).toUpperCase().padEnd(6, 'X');
+    if (!state.importSessions.has(code)) return code;
+  }
+  return randomId().replace(/[^a-z0-9]+/gi, '').slice(0, 8).toUpperCase();
+}
+
+function normalizeImportCode(code) {
+  return String(code || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '');
+}
+
+function cleanupImportSessions(state) {
+  const now = Date.now();
+  for (const [code, session] of state.importSessions.entries()) {
+    if (session.expiresAt <= now) state.importSessions.delete(code);
+  }
+}
+
+function findLatestImportSession(state, tokenKey) {
+  let latest = null;
+  for (const session of state.importSessions.values()) {
+    if (session.tokenKey !== tokenKey) continue;
+    if (!latest || session.createdAt > latest.createdAt) latest = session;
+  }
+  return latest;
+}
+
+function getImportedWatchLater(state, tokenKey) {
+  return state.importedWatchLater.get(tokenKey) || null;
 }
 
 const WATCH_LATER_QUERY = `
