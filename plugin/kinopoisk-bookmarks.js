@@ -250,7 +250,7 @@
       });
 
       setIndex(index);
-      return buildWatchLaterItems(data.movies || [], showNotice).then(function (items) {
+      return buildWatchLaterItems(data, showNotice).then(function (items) {
         setWatchLaterItems(items);
         setLastSync({
           remoteCount: (data.movies || []).length,
@@ -275,7 +275,11 @@
     });
   }
 
-  function buildWatchLaterItems(movies, showNotice) {
+  function buildWatchLaterItems(data, showNotice) {
+    var movies = data.movies || [];
+    var backendCards = data.cards || [];
+    if (backendCards.length) return Promise.resolve(backendCards);
+
     var queue = Promise.resolve();
     var items = [];
 
@@ -736,7 +740,14 @@
       lines.push('hasPlannedToWatch: ' + Boolean(diagnostics.hasPlannedToWatch));
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
+      if (diagnostics.cardsCount !== undefined) lines.push('backend cardsCount: ' + diagnostics.cardsCount);
+      if (diagnostics.unresolvedCount !== undefined) lines.push('backend unresolvedCount: ' + diagnostics.unresolvedCount);
       if (diagnostics.userDataKeys && diagnostics.userDataKeys.length) lines.push('userDataKeys: ' + diagnostics.userDataKeys.join(', '));
+      if (diagnostics.unresolved && diagnostics.unresolved.length) {
+        lines.push('Не сопоставлены: ' + diagnostics.unresolved.slice(0, 5).map(function (item) {
+          return item.title || item.kinopoisk_id;
+        }).join(', '));
+      }
       if (diagnostics.topLevelError) lines.push('topLevelError: ' + diagnostics.topLevelError);
       if (diagnostics.upstreamStatus) lines.push('upstreamStatus: ' + diagnostics.upstreamStatus);
       if (diagnostics.errors && diagnostics.errors.length) {

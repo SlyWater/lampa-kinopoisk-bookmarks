@@ -3,6 +3,7 @@ import { formatRatingBadges, mergeBookmarkIndexes, normalizeMovieIds } from '../
 const DEFAULT_ALLOHA_TOKEN = '04941a9a3ca3ac16e2b4327347bbc1';
 const DEFAULT_KINOPOISK_GRAPHQL_URL = 'https://graphql.kinopoisk.ru/graphql/';
 const DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL = 'https://script.google.com/macros/s/AKfycbwQhxl9xQPv46uChWJ1UDg6BjSmefbSlTRUoSZz5f1rZDRvdhAGTi6RHyXwcSeyBtPr/exec';
+const TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -86,6 +87,9 @@ async function authToken(fetchImpl, env, request, grantType) {
 async function listBookmarks(fetchImpl, env, request) {
   const token = getBearerToken(request);
   if (!token) return json({ error: 'missing_authorization' }, 401);
+  const url = new URL(request.url);
+  const enrich = url.searchParams.get('enrich') !== '0';
+  const full = url.searchParams.get('full') !== '0';
 
   let data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
   let items = extractWatchLaterItems(data);
@@ -93,7 +97,7 @@ async function listBookmarks(fetchImpl, env, request) {
   let diagnostics = buildBookmarksDiagnostics(data, movies, 'graphql');
 
   if (!movies.length && env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1') {
-    const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token);
+    const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token, full);
     const fallbackItems = extractWatchLaterItems(fallback);
     const fallbackMovies = fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean);
 
@@ -106,9 +110,14 @@ async function listBookmarks(fetchImpl, env, request) {
       diagnostics.fallback = buildBookmarksDiagnostics(fallback, fallbackMovies, 'apps_script');
     }
   }
+  const cardResult = enrich ? await buildLampaCards(fetchImpl, env, movies) : { cards: [], unresolved: [] };
+  diagnostics.cardsCount = cardResult.cards.length;
+  diagnostics.unresolvedCount = cardResult.unresolved.length;
+  diagnostics.unresolved = cardResult.unresolved.slice(0, 20);
 
   return json({
     movies,
+    cards: cardResult.cards,
     bookmarkIndex: mergeBookmarkIndexes({}, movies),
     diagnostics
   });
@@ -146,9 +155,7 @@ async function resolveRatings(fetchImpl, env, request) {
   else if (name) query = `name=${encodeURIComponent(name)}${year ? `&year=${encodeURIComponent(year)}` : ''}`;
   else return json({ error: 'missing_movie_id' }, 400);
 
-  const data = await upstreamJson(fetchImpl, `https://api.alloha.tv/?token=${encodeURIComponent(token)}&${query}`, {
-    method: 'GET'
-  });
+  const data = await resolveAlloha(fetchImpl, env, query);
 
   if (data.status !== 'success' || !data.data) return json({ error: 'not_found', raw: data }, 404);
 
@@ -185,12 +192,120 @@ async function kinopoiskGraphql(fetchImpl, env, token, query, variables) {
   });
 }
 
-async function kinopoiskAppsScriptList(fetchImpl, env, token) {
+async function kinopoiskAppsScriptList(fetchImpl, env, token, full = true) {
   const endpoint = env.KINOPOISK_APPS_SCRIPT_LIST_URL || DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL;
-  const separator = endpoint.includes('?') ? '&' : '?';
-  return upstreamJson(fetchImpl, `${endpoint}${separator}oauth=${encodeURIComponent(token)}`, {
+  const collectedItems = [];
+  let firstData = null;
+  let lastData = null;
+  let offset = 0;
+  const limit = Number(env.KINOPOISK_APPS_SCRIPT_PAGE_SIZE || 50);
+  const maxItems = Number(env.KINOPOISK_MAX_IMPORT || 500);
+
+  do {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const pageData = await upstreamJson(fetchImpl, `${endpoint}${separator}oauth=${encodeURIComponent(token)}&offset=${offset}`, {
+      method: 'GET'
+    });
+    if (!firstData) firstData = pageData;
+    lastData = pageData;
+
+    const pageItems = extractWatchLaterItems(pageData);
+    collectedItems.push(...pageItems);
+
+    const total = pageData?.data?.userProfile?.userData?.plannedToWatch?.movies?.total || collectedItems.length;
+    offset += limit;
+    if (!full || !pageItems.length || collectedItems.length >= total || collectedItems.length >= maxItems) break;
+  } while (true);
+
+  const result = firstData || lastData || {};
+  const planned = result?.data?.userProfile?.userData?.plannedToWatch?.movies;
+  if (planned) planned.items = collectedItems;
+  return result;
+}
+
+async function resolveAlloha(fetchImpl, env, query) {
+  const token = env.ALLOHA_TOKEN || DEFAULT_ALLOHA_TOKEN;
+  return upstreamJson(fetchImpl, `https://api.alloha.tv/?token=${encodeURIComponent(token)}&${query}`, {
     method: 'GET'
   });
+}
+
+async function buildLampaCards(fetchImpl, env, movies) {
+  const cards = [];
+  const unresolved = [];
+
+  for (const movie of movies) {
+    const card = await buildLampaCard(fetchImpl, env, movie);
+    if (card) cards.push(card);
+    else unresolved.push({
+      kinopoisk_id: movie.kinopoisk_id,
+      title: movie.title,
+      year: movie.year
+    });
+  }
+
+  return { cards, unresolved };
+}
+
+async function buildLampaCard(fetchImpl, env, movie) {
+  const resolved = await resolveAlloha(fetchImpl, env, `kp=${encodeURIComponent(movie.kinopoisk_id)}`);
+  const alloha = resolved?.data || {};
+  const tmdbId = alloha.id_tmdb;
+  const type = alloha.category === 2 ? 'tv' : 'movie';
+  let card = null;
+
+  if (tmdbId) card = await fetchTmdb(fetchImpl, env, type, tmdbId);
+  if (!card) card = await strictTmdbSearch(fetchImpl, env, movie, alloha);
+  if (!card) return null;
+
+  card.source = 'tmdb';
+  card.kinopoisk_id = String(movie.kinopoisk_id);
+  card.id_kp = String(movie.kinopoisk_id);
+  return card;
+}
+
+async function fetchTmdb(fetchImpl, env, type, tmdbId) {
+  const domain = env.TMDB_PROXY_DOMAIN || 'cub.red';
+  const url = `https://tmdb.${domain}/3/${type}/${encodeURIComponent(tmdbId)}?api_key=${TMDB_API_KEY}&language=ru`;
+  const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
+  if (data?.error || !data?.id) return null;
+  return data;
+}
+
+async function strictTmdbSearch(fetchImpl, env, movie, alloha) {
+  const type = alloha.category === 2 ? 'tv' : 'movie';
+  const title = alloha.original_name || movie.original_title || movie.title;
+  const year = alloha.year || movie.year;
+  if (!title || !year) return null;
+
+  const domain = env.TMDB_PROXY_DOMAIN || 'cub.red';
+  const path = type === 'tv' ? 'search/tv' : 'search/movie';
+  const yearParam = type === 'tv' ? 'first_air_date_year' : 'year';
+  const url = `https://tmdb.${domain}/3/${path}?query=${encodeURIComponent(title)}&api_key=${TMDB_API_KEY}&${yearParam}=${encodeURIComponent(year)}&language=ru`;
+  const data = await upstreamJson(fetchImpl, url, { method: 'GET' });
+  const results = Array.isArray(data?.results) ? data.results : [];
+  const matched = results.find((candidate) => isStrictTmdbMatch(candidate, movie, alloha, type, year));
+  return matched || null;
+}
+
+function isStrictTmdbMatch(candidate, movie, alloha, type, year) {
+  const candidateYear = String((type === 'tv' ? candidate.first_air_date : candidate.release_date) || '').slice(0, 4);
+  if (candidateYear && String(year) !== candidateYear) return false;
+
+  const expected = normalizeTitle(alloha.original_name || movie.original_title || movie.title);
+  const localized = normalizeTitle(movie.title);
+  const candidateTitles = [
+    candidate.title,
+    candidate.name,
+    candidate.original_title,
+    candidate.original_name
+  ].map(normalizeTitle).filter(Boolean);
+
+  return candidateTitles.includes(expected) || candidateTitles.includes(localized);
+}
+
+function normalizeTitle(title) {
+  return String(title || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/gi, ' ').trim();
 }
 
 async function upstreamJson(fetchImpl, url, options) {

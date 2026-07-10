@@ -90,7 +90,7 @@ test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async ()
     }
   });
 
-  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
     headers: { authorization: 'Bearer token' }
   }));
   assert.equal(response.status, 200);
@@ -139,7 +139,7 @@ test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData
     }
   });
 
-  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
     headers: { authorization: 'Bearer token' }
   }));
 
@@ -149,6 +149,89 @@ test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData
   assert.equal(data.movies[0].kinopoisk_id, '500');
   assert.equal(data.movies[0].poster, 'https://avatars.mds.yandex.net/get-kinopoisk-image/example/600x900');
   assert.equal(data.diagnostics.source, 'apps_script');
+});
+
+test('GET /bookmarks/list can enrich movies into functional TMDB cards', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 1,
+                    items: [{ movie: { id: 326, title: { localized: 'Побег из Шоушенка', original: 'The Shawshank Redemption' }, productionYear: 1994 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      if (text.includes('api.alloha.tv')) {
+        return jsonResponse({ status: 'success', data: { id_kp: 326, id_tmdb: 278, category: 1, original_name: 'The Shawshank Redemption', year: 1994 } });
+      }
+      if (text.includes('tmdb.cub.red/3/movie/278')) {
+        return jsonResponse({ id: 278, title: 'Побег из Шоушенка', release_date: '1994-09-23' });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+    headers: { authorization: 'Bearer token' }
+  }));
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.cards[0].id, 278);
+  assert.equal(data.cards[0].kinopoisk_id, '326');
+  assert.equal(data.diagnostics.cardsCount, 1);
+});
+
+test('GET /bookmarks/list paginates Apps Script results', async () => {
+  const seen = [];
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        const offset = Number(new URL(text).searchParams.get('offset') || 0);
+        seen.push(offset);
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 2,
+                    items: offset === 0
+                      ? [{ movie: { id: 1, title: { localized: 'One' }, productionYear: 2026 } }]
+                      : [{ movie: { id: 2, title: { localized: 'Two' }, productionYear: 2026 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      if (text.includes('api.alloha.tv')) return jsonResponse({ status: 'error' }, 404);
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer token' }
+  }));
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(seen, [0, 50]);
+  assert.equal(data.movies.length, 2);
 });
 
 test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {
