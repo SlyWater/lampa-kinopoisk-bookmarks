@@ -680,7 +680,18 @@
     ensureToken().then(function () {
       return api('/bookmarks/list', { auth: true });
     }).then(function (data) {
+      var diagnostics = data.diagnostics || {};
       lines.push('Проверка сейчас: Кинопоиск вернул ' + ((data.movies || []).length) + ' фильмов');
+      lines.push('hasUserData: ' + Boolean(diagnostics.hasUserData));
+      lines.push('hasPlannedToWatch: ' + Boolean(diagnostics.hasPlannedToWatch));
+      lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
+      lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
+      if (diagnostics.userDataKeys && diagnostics.userDataKeys.length) lines.push('userDataKeys: ' + diagnostics.userDataKeys.join(', '));
+      if (diagnostics.errors && diagnostics.errors.length) {
+        lines.push('GraphQL errors: ' + diagnostics.errors.map(function (error) {
+          return error.message;
+        }).join(' | '));
+      }
       openDiagnosticsModal(lines);
     }).catch(function (error) {
       lines.push('Проверка сейчас: ошибка ' + (error.message || String(error)));

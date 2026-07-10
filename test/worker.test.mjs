@@ -98,6 +98,8 @@ test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async ()
   const data = await response.json();
   assert.equal(data.movies[0].kinopoisk_id, '326');
   assert.equal(data.bookmarkIndex['kp:326'].status, 'watch_later');
+  assert.equal(data.diagnostics.hasPlannedToWatch, true);
+  assert.equal(data.diagnostics.total, 1);
 });
 
 test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {

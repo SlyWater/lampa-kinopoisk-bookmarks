@@ -89,10 +89,12 @@ async function listBookmarks(fetchImpl, env, request) {
   const data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
   const items = data?.data?.userProfile?.userData?.plannedToWatch?.movies?.items || [];
   const movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
+  const diagnostics = buildBookmarksDiagnostics(data, movies);
 
   return json({
     movies,
-    bookmarkIndex: mergeBookmarkIndexes({}, movies)
+    bookmarkIndex: mergeBookmarkIndexes({}, movies),
+    diagnostics
   });
 }
 
@@ -214,6 +216,30 @@ function normalizeKinopoiskListItem(item) {
     original_title: movie.title?.original || movie.originalName || '',
     year: movie.productionYear || movie.year || null,
     updatedAt: item.createdAt || item.updatedAt || new Date(0).toISOString()
+  };
+}
+
+function buildBookmarksDiagnostics(data, movies) {
+  const userProfile = data?.data?.userProfile;
+  const userData = userProfile?.userData;
+  const plannedToWatch = userData?.plannedToWatch;
+  const plannedMovies = plannedToWatch?.movies;
+
+  return {
+    hasData: Boolean(data?.data),
+    hasUserProfile: Boolean(userProfile),
+    hasUserData: Boolean(userData),
+    hasPlannedToWatch: Boolean(plannedToWatch),
+    dataKeys: data?.data ? Object.keys(data.data) : [],
+    userDataKeys: userData ? Object.keys(userData) : [],
+    plannedToWatchKeys: plannedToWatch ? Object.keys(plannedToWatch) : [],
+    total: plannedMovies?.total ?? null,
+    rawItemsCount: Array.isArray(plannedMovies?.items) ? plannedMovies.items.length : null,
+    parsedMoviesCount: movies.length,
+    errors: Array.isArray(data?.errors) ? data.errors.map((error) => ({
+      message: error.message || '',
+      path: error.path || null
+    })) : []
   };
 }
 
