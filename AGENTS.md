@@ -36,3 +36,4 @@
 - Do not auto-sync watch-later on plugin startup; it can block manual progress UI. Use local cached items until the user starts sync.
 - Backend enrichment should prefer direct TMDB id, then IMDb `find`, then strict title/year search. If no TMDB card is safe, return a marked Kinopoisk fallback card so the bookmark remains visible.
 - Apps Script fallback pagination is auto-detected across `offset`, `skip`, `page`, and `start`; diagnostics must expose whether pagination is actually supported by the external script.
+- Direct Kinopoisk GraphQL list loading should try pagination variants (`offset`, `skip`, `page`) before falling back to Apps Script. If any upstream returns only part of the list, diagnostics must expose `partialList`, `missingItemsCount`, and a warning.

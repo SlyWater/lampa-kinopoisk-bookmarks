@@ -892,6 +892,9 @@
       lines.push('hasPlannedToWatch: ' + Boolean(diagnostics.hasPlannedToWatch));
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
+      if (diagnostics.partialList !== undefined) lines.push('partialList: ' + Boolean(diagnostics.partialList));
+      if (diagnostics.missingItemsCount) lines.push('missingItemsCount: ' + diagnostics.missingItemsCount);
+      if (diagnostics.warning) lines.push('warning: ' + diagnostics.warning);
       if (diagnostics.pagination) {
         lines.push('paginationSupported: ' + Boolean(diagnostics.pagination.supported));
         if (diagnostics.pagination.param) lines.push('paginationParam: ' + diagnostics.pagination.param);

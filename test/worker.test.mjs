@@ -102,6 +102,106 @@ test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async ()
   assert.equal(data.diagnostics.total, 1);
 });
 
+test('GET /bookmarks/list can paginate direct Kinopoisk GraphQL results', async () => {
+  const offsets = [];
+  const handler = createWorkerHandler({
+    fetch: async (url, options) => {
+      assert.match(String(url), /graphql\.kinopoisk\.ru/);
+      const body = JSON.parse(options.body);
+      const offset = Number(body.variables?.offset || 0);
+      offsets.push(offset);
+      return jsonResponse({
+        data: {
+          userProfile: {
+            userData: {
+              plannedToWatch: {
+                movies: {
+                  total: 2,
+                  items: offset === 0
+                    ? [{ movie: { id: 101, title: { localized: 'One' }, productionYear: 2026 } }]
+                    : [{ movie: { id: 102, title: { localized: 'Two' }, productionYear: 2026 } }]
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer token' }
+  }));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.deepEqual(offsets, [0, 1]);
+  assert.equal(data.movies.length, 2);
+  assert.equal(data.diagnostics.source, 'graphql');
+  assert.equal(data.diagnostics.pagination.supported, true);
+  assert.equal(data.diagnostics.pagination.param, 'offset');
+});
+
+test('GET /bookmarks/list uses Apps Script when direct GraphQL is partial and not pageable', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url, options) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) {
+        const body = JSON.parse(options.body);
+        if (body.variables && Object.keys(body.variables).length) {
+          return jsonResponse({ errors: [{ message: 'Unknown argument' }], data: {} });
+        }
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 3,
+                    items: [{ movie: { id: 101, title: { localized: 'One' }, productionYear: 2026 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 3,
+                    items: [
+                      { movie: { id: 101, title: { localized: 'One' }, productionYear: 2026 } },
+                      { movie: { id: 102, title: { localized: 'Two' }, productionYear: 2026 } },
+                      { movie: { id: 103, title: { localized: 'Three' }, productionYear: 2026 } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer token' }
+  }));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.equal(data.diagnostics.source, 'apps_script');
+  assert.equal(data.movies.length, 3);
+});
+
 test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData', async () => {
   let calls = 0;
   const handler = createWorkerHandler({

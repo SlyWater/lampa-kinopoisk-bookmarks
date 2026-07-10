@@ -11,6 +11,11 @@ const JSON_HEADERS = {
   'access-control-allow-methods': 'GET,POST,OPTIONS',
   'access-control-allow-headers': 'authorization,content-type'
 };
+const GRAPHQL_WATCH_LATER_PAGE_VARIANTS = [
+  { param: 'offset' },
+  { param: 'skip' },
+  { param: 'page' }
+];
 
 const defaultWorkerHandler = createWorkerHandler({ fetch: (...args) => fetch(...args) });
 
@@ -198,7 +203,7 @@ function getBookmarksSyncStatus(request, state) {
 
 async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProgress) {
   if (onProgress) onProgress({ phase: 'list', message: 'Получаю список Кинопоиска', processed: 0, total: 0 });
-  let data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
+  let data = await kinopoiskGraphqlWatchLaterList(fetchImpl, env, token, full);
   let items = extractWatchLaterItems(data);
   let movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
   let movieDedupe = dedupeKinopoiskMovies(movies);
@@ -206,14 +211,17 @@ async function buildBookmarksPayload(fetchImpl, env, token, enrich, full, onProg
   let diagnostics = buildBookmarksDiagnostics(data, movies, 'graphql');
   diagnostics.duplicateMoviesCount = movieDedupe.duplicates;
 
-  if (!movies.length && env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1') {
+  const shouldTryAppsScriptFallback = env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1'
+    && (!movies.length || (diagnostics.partialList && !diagnostics.pagination?.supported));
+
+  if (shouldTryAppsScriptFallback) {
     if (onProgress) onProgress({ phase: 'list', message: 'Получаю список через fallback', processed: 0, total: 0 });
     const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token, full);
     const fallbackItems = extractWatchLaterItems(fallback);
     const fallbackMovieDedupe = dedupeKinopoiskMovies(fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean));
     const fallbackMovies = fallbackMovieDedupe.items;
 
-    if (fallbackMovies.length || !diagnostics.hasUserData) {
+    if (fallbackMovies.length > movies.length || !diagnostics.hasUserData) {
       data = fallback;
       items = fallbackItems;
       movies = fallbackMovies;
@@ -320,6 +328,77 @@ async function kinopoiskGraphql(fetchImpl, env, token, query, variables) {
   });
 }
 
+async function kinopoiskGraphqlWatchLaterList(fetchImpl, env, token, full = true) {
+  const firstData = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
+  const firstItems = extractWatchLaterItems(firstData);
+  const total = firstData?.data?.userProfile?.userData?.plannedToWatch?.movies?.total || firstItems.length;
+  const limit = positiveInteger(env.KINOPOISK_GRAPHQL_PAGE_SIZE, firstItems.length || 50, 1, 100);
+  const maxItems = positiveInteger(env.KINOPOISK_MAX_IMPORT, 500, 1, 1000);
+  const pagination = {
+    supported: false,
+    param: '',
+    requestedPages: 1,
+    uniquePages: firstItems.length ? 1 : 0,
+    total
+  };
+
+  if (!full || !firstItems.length || firstItems.length >= total || firstItems.length >= maxItems) {
+    firstData._kpPagination = pagination;
+    return firstData;
+  }
+
+  const detected = await detectGraphqlWatchLaterPagination(fetchImpl, env, token, firstItems, limit);
+  if (!detected) {
+    pagination.requestedPages += GRAPHQL_WATCH_LATER_PAGE_VARIANTS.length;
+    firstData._kpPagination = pagination;
+    return firstData;
+  }
+
+  const collectedItems = [...firstItems, ...detected.items];
+  pagination.supported = true;
+  pagination.param = detected.param;
+  pagination.requestedPages += detected.requestedPages;
+  pagination.uniquePages += 1;
+
+  let page = 2;
+  while (collectedItems.length < total && collectedItems.length < maxItems) {
+    const pageData = await kinopoiskGraphqlWatchLaterPage(fetchImpl, env, token, detected.param, page, limit);
+    pagination.requestedPages += 1;
+    const pageItems = extractWatchLaterItems(pageData);
+    if (!pageItems.length || pageHasOnlyKnownItems(pageItems, collectedItems)) break;
+    pagination.uniquePages += 1;
+    collectedItems.push(...pageItems);
+    page += 1;
+  }
+
+  const planned = firstData?.data?.userProfile?.userData?.plannedToWatch?.movies;
+  if (planned) planned.items = collectedItems;
+  firstData._kpPagination = pagination;
+  return firstData;
+}
+
+async function detectGraphqlWatchLaterPagination(fetchImpl, env, token, firstItems, limit) {
+  for (const variant of GRAPHQL_WATCH_LATER_PAGE_VARIANTS) {
+    const pageData = await kinopoiskGraphqlWatchLaterPage(fetchImpl, env, token, variant.param, 1, limit);
+    const pageItems = extractWatchLaterItems(pageData);
+    if (pageItems.length && !pageHasOnlyKnownItems(pageItems, firstItems)) {
+      return { param: variant.param, items: pageItems, requestedPages: 1 };
+    }
+  }
+
+  return null;
+}
+
+async function kinopoiskGraphqlWatchLaterPage(fetchImpl, env, token, param, page, limit) {
+  const variables = graphqlPageVariables(param, page, limit);
+  const query = param === 'page'
+    ? WATCH_LATER_QUERY_PAGE
+    : param === 'skip'
+      ? WATCH_LATER_QUERY_SKIP
+      : WATCH_LATER_QUERY_OFFSET;
+  return kinopoiskGraphql(fetchImpl, env, token, query, variables);
+}
+
 async function kinopoiskAppsScriptList(fetchImpl, env, token, full = true) {
   const endpoint = env.KINOPOISK_APPS_SCRIPT_LIST_URL || DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL;
   const collectedItems = [];
@@ -397,6 +476,12 @@ function pageParams(param, page, limit) {
   if (param === 'offset') return { offset: page * limit, limit };
   if (param === 'skip') return { skip: page * limit, limit };
   if (param === 'start') return { start: page * limit, limit };
+  return { offset: page * limit, limit };
+}
+
+function graphqlPageVariables(param, page, limit) {
+  if (param === 'page') return { page: page + 1, limit };
+  if (param === 'skip') return { skip: page * limit, limit };
   return { offset: page * limit, limit };
 }
 
@@ -712,6 +797,10 @@ function buildBookmarksDiagnostics(data, movies, source) {
   const userData = userProfile?.userData;
   const plannedToWatch = userData?.plannedToWatch;
   const plannedMovies = plannedToWatch?.movies;
+  const pagination = data?._kpPagination || null;
+  const total = plannedMovies?.total ?? pagination?.total ?? null;
+  const rawItemsCount = Array.isArray(plannedMovies?.items) ? plannedMovies.items.length : null;
+  const partialList = Boolean(total && rawItemsCount !== null && rawItemsCount < total);
 
   return {
     source,
@@ -722,10 +811,15 @@ function buildBookmarksDiagnostics(data, movies, source) {
     dataKeys: data?.data ? Object.keys(data.data) : [],
     userDataKeys: userData ? Object.keys(userData) : [],
     plannedToWatchKeys: plannedToWatch ? Object.keys(plannedToWatch) : [],
-    total: plannedMovies?.total ?? null,
-    rawItemsCount: Array.isArray(plannedMovies?.items) ? plannedMovies.items.length : null,
+    total,
+    rawItemsCount,
     parsedMoviesCount: movies.length,
-    pagination: data?._kpPagination || null,
+    pagination,
+    partialList,
+    missingItemsCount: partialList ? total - rawItemsCount : 0,
+    warning: partialList && pagination && !pagination.supported
+      ? `Upstream returned only ${rawItemsCount} of ${total} movies and did not expose working pagination`
+      : '',
     topLevelError: data?.error || '',
     upstreamStatus: data?.status || null,
     errors: Array.isArray(data?.errors) ? data.errors.map((error) => ({
@@ -867,6 +961,78 @@ query LampaKinopoiskWatchLater {
     userData {
       plannedToWatch {
         movies {
+          total
+          items {
+            createdAt
+            movie {
+              id
+              title {
+                localized
+                original
+              }
+              productionYear
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const WATCH_LATER_QUERY_OFFSET = `
+query LampaKinopoiskWatchLaterOffset($offset: Int!, $limit: Int!) {
+  userProfile {
+    userData {
+      plannedToWatch {
+        movies(offset: $offset, limit: $limit) {
+          total
+          items {
+            createdAt
+            movie {
+              id
+              title {
+                localized
+                original
+              }
+              productionYear
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const WATCH_LATER_QUERY_SKIP = `
+query LampaKinopoiskWatchLaterSkip($skip: Int!, $limit: Int!) {
+  userProfile {
+    userData {
+      plannedToWatch {
+        movies(skip: $skip, limit: $limit) {
+          total
+          items {
+            createdAt
+            movie {
+              id
+              title {
+                localized
+                original
+              }
+              productionYear
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const WATCH_LATER_QUERY_PAGE = `
+query LampaKinopoiskWatchLaterPage($page: Int!, $limit: Int!) {
+  userProfile {
+    userData {
+      plannedToWatch {
+        movies(page: $page, limit: $limit) {
           total
           items {
             createdAt
