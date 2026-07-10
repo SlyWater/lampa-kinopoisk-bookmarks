@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check plugin/kinopoisk-bookmarks.js && node --check worker/src/index.js",
+    "check": "node --check plugin/kinopoisk-bookmarks.js && node --check worker/src/index.js && node --check worker/node-server.js",
+    "serve:worker": "node worker/node-server.js",
     "test": "node --test"
   }
 }

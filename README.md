@@ -49,6 +49,56 @@ wrangler secret put ALLOHA_TOKEN
 wrangler deploy --config worker/wrangler.toml
 ```
 
+## Запуск на своём Ubuntu-сервере
+
+Cloudflare Worker не обязателен. Тот же прокси можно запустить на своём сервере как маленький Node-сервис.
+
+Минимальные требования:
+
+- Node.js 18 или новее.
+- Публичный HTTPS-домен или reverse proxy через nginx/Caddy.
+- Переменные окружения `YANDEX_CLIENT_ID` и `YANDEX_CLIENT_SECRET`.
+
+Локальный запуск:
+
+```bash
+cd /opt/lampa-kinopoisk-bookmarks
+export YANDEX_CLIENT_ID="..."
+export YANDEX_CLIENT_SECRET="..."
+export ALLOHA_TOKEN="..."
+export PORT=8787
+npm run serve:worker
+```
+
+Проверка:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+Пример systemd unit:
+
+```ini
+[Unit]
+Description=Lampa Kinopoisk Bookmarks Proxy
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/lampa-kinopoisk-bookmarks
+ExecStart=/usr/bin/node worker/node-server.js
+Restart=always
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=YANDEX_CLIENT_ID=...
+Environment=YANDEX_CLIENT_SECRET=...
+Environment=ALLOHA_TOKEN=...
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Дальше nginx/Caddy должен проксировать внешний HTTPS URL на `127.0.0.1:8787`. Именно внешний HTTPS URL нужно вставить в настройку `URL Worker` в Lampa.
+
 ## Установка плагина в Lampa
 
 1. Опубликуйте `plugin/kinopoisk-bookmarks.js` по HTTPS.
