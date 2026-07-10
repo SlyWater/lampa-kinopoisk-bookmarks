@@ -23,6 +23,7 @@
   };
 
   var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4.75C6 3.78 6.78 3 7.75 3h8.5C17.22 3 18 3.78 18 4.75v15.5l-6-3.35-6 3.35V4.75Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+  var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
 
   function getProxyUrl() {
     return String(Lampa.Storage.get(STORAGE.proxyUrl, DEFAULT_PROXY_URL) || DEFAULT_PROXY_URL).replace(/\/+$/, '');
@@ -211,11 +212,37 @@
       });
 
       setIndex(index);
-      if (showNotice) Lampa.Noty.show('Закладки Кинопоиска синхронизированы');
-      return index;
+      return importWatchLaterToLampa(data.movies || [], showNotice).then(function () {
+        if (showNotice) Lampa.Noty.show('Закладки Кинопоиска добавлены в Позже');
+        return index;
+      });
     }).catch(function (error) {
       if (showNotice) Lampa.Noty.show('Не удалось синхронизировать закладки');
       console.log('Kinopoisk Bookmarks', error);
+    });
+  }
+
+  function importWatchLaterToLampa(movies, showNotice) {
+    if (!Lampa.Favorite || !Lampa.Favorite.add) return Promise.resolve();
+    var queue = Promise.resolve();
+    var imported = 0;
+
+    movies.forEach(function (movie) {
+      queue = queue.then(function () {
+        return resolveMovie(movie).then(function (resolved) {
+          return addToLampaWatchLater(movie, resolved);
+        }).then(function (added) {
+          if (added) imported++;
+        }).catch(function (error) {
+          console.log('Kinopoisk Bookmarks', 'favorite import failed', movie, error);
+        });
+      });
+    });
+
+    return queue.then(function () {
+      if (showNotice && movies.length) {
+        console.log('Kinopoisk Bookmarks', 'Imported to Lampa Later:', imported, 'of', movies.length);
+      }
     });
   }
 
@@ -224,17 +251,39 @@
     var key = movieKey(ids);
     var ratingCache = getRatings();
 
-    if (ids.kinopoiskId && ratingCache['kp:' + ids.kinopoiskId]) {
+    if (ids.kinopoiskId && ids.tmdbId && ratingCache['kp:' + ids.kinopoiskId]) {
       return Promise.resolve({ ids: ids, ratings: ratingCache['kp:' + ids.kinopoiskId] });
     }
 
-    if (!ids.kinopoiskId && !ids.tmdbId) return Promise.resolve({ ids: ids, ratings: null });
+    if (!ids.kinopoiskId && !ids.tmdbId && !movieTitle(movie)) return Promise.resolve({ ids: ids, ratings: null, meta: {} });
 
-    var query = ids.kinopoiskId ? '?kinopoiskId=' + encodeURIComponent(ids.kinopoiskId) + '&kp=' + encodeURIComponent(ids.kinopoiskId) : '?tmdbId=' + encodeURIComponent(ids.tmdbId) + '&tmdb=' + encodeURIComponent(ids.tmdbId);
+    var query = '';
+    if (ids.kinopoiskId) query = '?kinopoiskId=' + encodeURIComponent(ids.kinopoiskId) + '&kp=' + encodeURIComponent(ids.kinopoiskId);
+    else if (ids.tmdbId) query = '?tmdbId=' + encodeURIComponent(ids.tmdbId) + '&tmdb=' + encodeURIComponent(ids.tmdbId);
+    else {
+      query = '?name=' + encodeURIComponent(movieTitle(movie));
+      var initialYear = movieYear(movie);
+      if (initialYear) query += '&year=' + encodeURIComponent(initialYear);
+    }
 
+    return resolveMovieByQuery(query, ids, key).then(function (resolved) {
+      if (resolved.ids.kinopoiskId || !movieTitle(movie)) return resolved;
+
+      var fallbackQuery = '?name=' + encodeURIComponent(movieTitle(movie));
+      var year = movieYear(movie);
+      if (year) fallbackQuery += '&year=' + encodeURIComponent(year);
+      return resolveMovieByQuery(fallbackQuery, ids, key);
+    }).catch(function (error) {
+      console.log('Kinopoisk Bookmarks', 'ratings resolve failed', error);
+      return { ids: ids, ratings: null, meta: {} };
+    });
+  }
+
+  function resolveMovieByQuery(query, ids, key) {
     return api('/ratings/resolve' + query).then(function (data) {
       var resolvedIds = data.ids || {};
       ids.kinopoiskId = ids.kinopoiskId || resolvedIds.kinopoiskId || resolvedIds.kinopoisk_id || resolvedIds.id_kp || '';
+      ids.tmdbId = ids.tmdbId || resolvedIds.tmdbId || resolvedIds.tmdb_id || resolvedIds.id_tmdb || '';
       ids.imdbId = ids.imdbId || resolvedIds.imdbId || '';
       var ratings = data.ratings || {};
       var ratingsKey = ids.kinopoiskId ? 'kp:' + ids.kinopoiskId : key;
@@ -242,11 +291,80 @@
         ratingCache[ratingsKey] = ratings;
         setRatings(ratingCache);
       }
-      return { ids: ids, ratings: ratings };
-    }).catch(function (error) {
-      console.log('Kinopoisk Bookmarks', 'ratings resolve failed', error);
-      return { ids: ids, ratings: null };
+      return { ids: ids, ratings: ratings, meta: data.movie || {} };
     });
+  }
+
+  function movieTitle(movie) {
+    return movie && (movie.title || movie.name || movie.original_title || movie.original_name || '');
+  }
+
+  function movieYear(movie) {
+    var date = movie && (movie.release_date || movie.first_air_date || movie.year || movie.productionYear || '');
+    return String(date).slice(0, 4);
+  }
+
+  function fetchTmdbCard(ids, meta, sourceMovie) {
+    if (!ids.tmdbId) return Promise.resolve(null);
+
+    var type = (meta && meta.type) || (sourceMovie && sourceMovie.name ? 'tv' : 'movie');
+    var domain = (Lampa.Manifest && Lampa.Manifest.cub_domain) ? Lampa.Manifest.cub_domain : 'cub.red';
+    var url = Lampa.Utils.protocol() + 'tmdb.' + domain + '/3/' + type + '/' + encodeURIComponent(ids.tmdbId) + '?api_key=' + TMDB_API_KEY + '&language=ru';
+
+    return fetch(url).then(function (response) {
+      if (!response.ok) throw new Error('TMDB request failed: ' + response.status);
+      return response.json();
+    }).then(function (card) {
+      card.source = 'tmdb';
+      card.kinopoisk_id = ids.kinopoiskId;
+      return card;
+    }).catch(function (error) {
+      console.log('Kinopoisk Bookmarks', 'tmdb card fetch failed', ids, error);
+      return buildMinimalFavoriteCard(ids, meta, sourceMovie, type);
+    });
+  }
+
+  function buildMinimalFavoriteCard(ids, meta, sourceMovie, type) {
+    var id = Number(ids.tmdbId || ids.kinopoiskId);
+    if (!id) return null;
+
+    var title = (sourceMovie && (sourceMovie.title || sourceMovie.name)) || (meta && meta.title) || '';
+    var original = (sourceMovie && (sourceMovie.original_title || sourceMovie.original_name)) || (meta && meta.original_title) || title;
+    var card = {
+      id: id,
+      source: 'tmdb',
+      kinopoisk_id: ids.kinopoiskId,
+      vote_average: 0,
+      overview: (meta && meta.description) || '',
+      poster_path: (meta && meta.poster) || '',
+      release_date: meta && meta.year ? String(meta.year) + '-01-01' : ''
+    };
+
+    if (type === 'tv') {
+      card.name = title || original;
+      card.original_name = original;
+      card.first_air_date = card.release_date;
+    } else {
+      card.title = title || original;
+      card.original_title = original;
+    }
+
+    return card;
+  }
+
+  function addToLampaWatchLater(sourceMovie, resolved) {
+    if (!Lampa.Favorite || !Lampa.Favorite.add) return Promise.resolve(false);
+
+    return fetchTmdbCard(resolved.ids, resolved.meta, sourceMovie).then(function (card) {
+      if (!card || !card.id) return false;
+      Lampa.Favorite.add('wath', card, 300);
+      return true;
+    });
+  }
+
+  function removeFromLampaWatchLater(movie) {
+    if (!Lampa.Favorite || !Lampa.Favorite.remove || !movie || !movie.id) return;
+    Lampa.Favorite.remove('wath', movie);
   }
 
   function applyStatus(key, ids, movie, nextStatus) {
@@ -263,12 +381,14 @@
         }).then(function () {
           delete index[key];
           setIndex(index);
+          removeFromLampaWatchLater(movie);
           Lampa.Noty.show('Закладка удалена');
         });
       }
 
       delete index[key];
       setIndex(index);
+      removeFromLampaWatchLater(movie);
       Lampa.Noty.show('Закладка удалена');
       return Promise.resolve();
     }
@@ -288,7 +408,9 @@
       }).then(function () {
         index[key] = buildIndexItem(ids, movie, nextStatus, true);
         setIndex(index);
-        Lampa.Noty.show('Добавлено в Буду смотреть');
+        return addToLampaWatchLater(movie, { ids: ids, meta: {} });
+      }).then(function () {
+        Lampa.Noty.show('Добавлено в Буду смотреть и Позже');
       });
     }
 

@@ -25,10 +25,38 @@ test('GET /ratings/resolve maps Alloha response to ids and badges', async () => 
 
   const data = await response.json();
   assert.deepEqual(data.ids, { tmdbId: '278', kinopoiskId: '326', imdbId: 'tt0111161' });
+  assert.equal(data.movie.type, 'movie');
   assert.deepEqual(data.badges, [
     { source: 'KP', value: '9.1' },
     { source: 'IMDb', value: '9.3' }
   ]);
+});
+
+test('GET /ratings/resolve can search Alloha by name and year', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      assert.match(String(url), /name=The%20Movie/);
+      assert.match(String(url), /year=2026/);
+      return jsonResponse({
+        status: 'success',
+        data: {
+          id_kp: 100,
+          id_tmdb: 200,
+          id_imdb: 'tt100',
+          category: 2,
+          rating_kp: 7.4,
+          rating_imdb: 7.1
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/ratings/resolve?name=The+Movie&year=2026'));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.equal(data.ids.kinopoiskId, '100');
+  assert.equal(data.movie.type, 'tv');
 });
 
 test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async () => {

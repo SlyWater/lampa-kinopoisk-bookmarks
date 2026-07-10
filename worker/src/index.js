@@ -119,9 +119,14 @@ async function resolveRatings(fetchImpl, env, request) {
   const params = request.method === 'GET' ? Object.fromEntries(new URL(request.url).searchParams) : await readJson(request);
   const ids = normalizeMovieIds(params);
   const token = env.ALLOHA_TOKEN || DEFAULT_ALLOHA_TOKEN;
-  const query = ids.kinopoiskId ? `kp=${encodeURIComponent(ids.kinopoiskId)}` : `tmdb=${encodeURIComponent(ids.tmdbId)}`;
+  const name = params.name || params.title || params.query || '';
+  const year = params.year || params.productionYear || '';
+  let query = '';
 
-  if (!ids.kinopoiskId && !ids.tmdbId) return json({ error: 'missing_movie_id' }, 400);
+  if (ids.kinopoiskId) query = `kp=${encodeURIComponent(ids.kinopoiskId)}`;
+  else if (ids.tmdbId) query = `tmdb=${encodeURIComponent(ids.tmdbId)}`;
+  else if (name) query = `name=${encodeURIComponent(name)}${year ? `&year=${encodeURIComponent(year)}` : ''}`;
+  else return json({ error: 'missing_movie_id' }, 400);
 
   const data = await upstreamJson(fetchImpl, `https://api.alloha.tv/?token=${encodeURIComponent(token)}&${query}`, {
     method: 'GET'
@@ -135,6 +140,14 @@ async function resolveRatings(fetchImpl, env, request) {
     ratings: {
       kp: movie.rating_kp ?? null,
       imdb: movie.rating_imdb ?? null
+    },
+    movie: {
+      type: movie.category === 2 ? 'tv' : 'movie',
+      title: movie.name || '',
+      original_title: movie.original_name || '',
+      year: movie.year || null,
+      poster: movie.poster || '',
+      description: movie.description || ''
     },
     badges: formatRatingBadges(movie),
     raw: env.DEBUG_RAW_ALLOHA === '1' ? movie : undefined
