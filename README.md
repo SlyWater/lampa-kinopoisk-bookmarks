@@ -2,6 +2,8 @@
 
 Плагин для Lampa, который добавляет статусы закладок в карточку фильма и показывает рейтинги Кинопоиска/IMDb на постерах.
 
+![Plugin icon](assets/icon.png)
+
 ## Возможности
 
 - Кнопка `Закладка` в полной карточке фильма.
@@ -15,6 +17,7 @@
 - `plugin/kinopoisk-bookmarks.js` - standalone JS-плагин для Lampa.
 - `worker/src/index.js` - Cloudflare Worker-прокси для OAuth, Kinopoisk GraphQL и Alloha resolve.
 - `shared/core.mjs` - чистые функции, покрытые тестами.
+- `assets/icon.png` - иконка для README/GitHub/Yandex OAuth приложения.
 - `test/*.test.mjs` - unit/integration тесты с моками внешних API.
 
 ## Настройка Cloudflare Worker
