@@ -65,7 +65,6 @@ Cloudflare Worker не обязателен. Тот же прокси можно
 cd /opt/lampa-kinopoisk-bookmarks
 export YANDEX_CLIENT_ID="..."
 export YANDEX_CLIENT_SECRET="..."
-export ALLOHA_TOKEN="..."
 export PORT=8787
 npm run serve:worker
 ```
@@ -91,11 +90,12 @@ Environment=HOST=127.0.0.1
 Environment=PORT=8787
 Environment=YANDEX_CLIENT_ID=...
 Environment=YANDEX_CLIENT_SECRET=...
-Environment=ALLOHA_TOKEN=...
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`ALLOHA_TOKEN` опционален и нужен только для более стабильного получения рейтингов/ID через Alloha. Авторизация Яндекса и синхронизация `Буду смотреть` работают без него.
 
 Дальше nginx/Caddy должен проксировать внешний HTTPS URL на `127.0.0.1:8787`. Именно внешний HTTPS URL нужно вставить в настройку `URL Worker` в Lampa.
 
