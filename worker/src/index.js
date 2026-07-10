@@ -12,14 +12,21 @@ const JSON_HEADERS = {
   'access-control-allow-headers': 'authorization,content-type'
 };
 
+const defaultWorkerHandler = createWorkerHandler({ fetch: (...args) => fetch(...args) });
+
 export default {
   fetch(request, env, ctx) {
-    return createWorkerHandler({ fetch })(request, env, ctx);
+    return defaultWorkerHandler(request, env, ctx);
   }
 };
 
 export function createWorkerHandler(deps = {}) {
   const fetchImpl = deps.fetch || fetch;
+  const state = deps.state || {
+    bookmarksCache: new Map(),
+    bookmarksInFlight: new Map(),
+    bookmarksCacheGeneration: 0
+  };
 
   return async function handleRequest(request, env = {}) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: JSON_HEADERS });
@@ -31,9 +38,9 @@ export function createWorkerHandler(deps = {}) {
       if (url.pathname === '/auth/device' && request.method === 'POST') return authDevice(fetchImpl, env, request);
       if (url.pathname === '/auth/token' && request.method === 'POST') return authToken(fetchImpl, env, request, 'device_code');
       if (url.pathname === '/auth/refresh' && request.method === 'POST') return authToken(fetchImpl, env, request, 'refresh_token');
-      if (url.pathname === '/bookmarks/list' && request.method === 'GET') return listBookmarks(fetchImpl, env, request);
-      if (url.pathname === '/bookmarks/watch-later/set' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'add');
-      if (url.pathname === '/bookmarks/watch-later/remove' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'remove');
+      if (url.pathname === '/bookmarks/list' && request.method === 'GET') return listBookmarks(fetchImpl, env, request, state);
+      if (url.pathname === '/bookmarks/watch-later/set' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'add', state);
+      if (url.pathname === '/bookmarks/watch-later/remove' && request.method === 'POST') return mutateWatchLater(fetchImpl, env, request, 'remove', state);
       if (url.pathname === '/ratings/resolve' && (request.method === 'GET' || request.method === 'POST')) return resolveRatings(fetchImpl, env, request);
 
       return json({ error: 'not_found' }, 404);
@@ -84,46 +91,85 @@ async function authToken(fetchImpl, env, request, grantType) {
   return json(data, data.error ? 400 : 200);
 }
 
-async function listBookmarks(fetchImpl, env, request) {
+async function listBookmarks(fetchImpl, env, request, state) {
   const token = getBearerToken(request);
   if (!token) return json({ error: 'missing_authorization' }, 401);
   const url = new URL(request.url);
   const enrich = url.searchParams.get('enrich') !== '0';
   const full = url.searchParams.get('full') !== '0';
+  const refresh = url.searchParams.get('refresh') === '1';
+  const cacheKey = await bookmarksCacheKey(token, { enrich, full });
+  const cacheTtl = positiveInteger(env.BOOKMARKS_CACHE_TTL_MS, 300000, 1000, 3600000);
+  const cacheGeneration = state.bookmarksCacheGeneration;
 
+  if (!refresh) {
+    const cached = getCachedBookmarks(state, cacheKey, cacheTtl);
+    if (cached) return json(withCacheDiagnostics(cached, true, false));
+  }
+
+  if (state.bookmarksInFlight.has(cacheKey)) {
+    const data = await state.bookmarksInFlight.get(cacheKey);
+    return json(withCacheDiagnostics(data, true, true));
+  }
+
+  const pending = buildBookmarksPayload(fetchImpl, env, token, enrich, full);
+  state.bookmarksInFlight.set(cacheKey, pending);
+
+  try {
+    const data = await pending;
+    if (state.bookmarksCacheGeneration === cacheGeneration) {
+      state.bookmarksCache.set(cacheKey, {
+        time: Date.now(),
+        data: cloneJson(data)
+      });
+    }
+    return json(withCacheDiagnostics(data, false, false));
+  } finally {
+    state.bookmarksInFlight.delete(cacheKey);
+  }
+}
+
+async function buildBookmarksPayload(fetchImpl, env, token, enrich, full) {
   let data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
   let items = extractWatchLaterItems(data);
   let movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
+  let movieDedupe = dedupeKinopoiskMovies(movies);
+  movies = movieDedupe.items;
   let diagnostics = buildBookmarksDiagnostics(data, movies, 'graphql');
+  diagnostics.duplicateMoviesCount = movieDedupe.duplicates;
 
   if (!movies.length && env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1') {
     const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token, full);
     const fallbackItems = extractWatchLaterItems(fallback);
-    const fallbackMovies = fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean);
+    const fallbackMovieDedupe = dedupeKinopoiskMovies(fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean));
+    const fallbackMovies = fallbackMovieDedupe.items;
 
     if (fallbackMovies.length || !diagnostics.hasUserData) {
       data = fallback;
       items = fallbackItems;
       movies = fallbackMovies;
       diagnostics = buildBookmarksDiagnostics(data, movies, 'apps_script');
+      diagnostics.duplicateMoviesCount = fallbackMovieDedupe.duplicates;
     } else {
       diagnostics.fallback = buildBookmarksDiagnostics(fallback, fallbackMovies, 'apps_script');
+      diagnostics.fallback.duplicateMoviesCount = fallbackMovieDedupe.duplicates;
     }
   }
   const cardResult = enrich ? await buildLampaCards(fetchImpl, env, movies) : { cards: [], unresolved: [] };
   diagnostics.cardsCount = cardResult.cards.length;
+  diagnostics.duplicateCardsCount = cardResult.duplicates || 0;
   diagnostics.unresolvedCount = cardResult.unresolved.length;
   diagnostics.unresolved = cardResult.unresolved.slice(0, 20);
 
-  return json({
+  return {
     movies,
     cards: cardResult.cards,
     bookmarkIndex: mergeBookmarkIndexes({}, movies),
     diagnostics
-  });
+  };
 }
 
-async function mutateWatchLater(fetchImpl, env, request, action) {
+async function mutateWatchLater(fetchImpl, env, request, action, state) {
   const token = getBearerToken(request);
   if (!token) return json({ error: 'missing_authorization' }, 401);
 
@@ -134,6 +180,8 @@ async function mutateWatchLater(fetchImpl, env, request, action) {
   const mutation = action === 'add' ? WATCH_LATER_ADD_MUTATION : WATCH_LATER_REMOVE_MUTATION;
   const data = await kinopoiskGraphql(fetchImpl, env, token, mutation, { movieId: Number(ids.kinopoiskId) });
   const status = data?.data?.movie?.plannedToWatch?.[action]?.status;
+
+  if (status === 'SUCCESS') clearBookmarksCache(state);
 
   return json({
     ok: status === 'SUCCESS',
@@ -231,20 +279,31 @@ async function resolveAlloha(fetchImpl, env, query) {
 }
 
 async function buildLampaCards(fetchImpl, env, movies) {
-  const cards = [];
+  const cardsByIndex = new Array(movies.length);
   const unresolved = [];
+  let nextIndex = 0;
+  const concurrency = Math.min(
+    movies.length || 1,
+    positiveInteger(env.BOOKMARKS_ENRICH_CONCURRENCY, 8, 1, 16)
+  );
 
-  for (const movie of movies) {
-    const card = await buildLampaCard(fetchImpl, env, movie);
-    if (card) cards.push(card);
-    else unresolved.push({
-      kinopoisk_id: movie.kinopoisk_id,
-      title: movie.title,
-      year: movie.year
-    });
+  async function worker() {
+    while (nextIndex < movies.length) {
+      const currentIndex = nextIndex++;
+      const movie = movies[currentIndex];
+      const card = await buildLampaCard(fetchImpl, env, movie);
+      if (card) cardsByIndex[currentIndex] = card;
+      else unresolved.push({
+        kinopoisk_id: movie.kinopoisk_id,
+        title: movie.title,
+        year: movie.year
+      });
+    }
   }
 
-  return { cards, unresolved };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  const deduped = dedupeLampaCards(cardsByIndex.filter(Boolean));
+  return { cards: deduped.items, unresolved, duplicates: deduped.duplicates };
 }
 
 async function buildLampaCard(fetchImpl, env, movie) {
@@ -369,6 +428,50 @@ function normalizeKinopoiskPoster(movie) {
   return candidate;
 }
 
+function dedupeKinopoiskMovies(movies) {
+  const seen = new Set();
+  const items = [];
+  let duplicates = 0;
+
+  for (const movie of movies) {
+    const key = movie?.kinopoisk_id ? `kp:${movie.kinopoisk_id}` : `${movie?.title || ''}:${movie?.year || ''}`;
+    if (!key || seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(key);
+    items.push(movie);
+  }
+
+  return { items, duplicates };
+}
+
+function dedupeLampaCards(cards) {
+  const seen = new Set();
+  const items = [];
+  let duplicates = 0;
+
+  for (const card of cards) {
+    const key = lampaCardKey(card);
+    if (!key || seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(key);
+    items.push(card);
+  }
+
+  return { items, duplicates };
+}
+
+function lampaCardKey(card) {
+  if (!card) return '';
+  if (card.kinopoisk_id || card.id_kp) return `kp:${card.kinopoisk_id || card.id_kp}`;
+  if (!card.id) return '';
+  const type = card.name && !card.title ? 'tv' : 'movie';
+  return `${type}:${card.id}`;
+}
+
 function extractWatchLaterItems(data) {
   return data?.data?.userProfile?.userData?.plannedToWatch?.movies?.items || [];
 }
@@ -402,6 +505,58 @@ function buildBookmarksDiagnostics(data, movies, source) {
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+}
+
+function getCachedBookmarks(state, key, ttl) {
+  const entry = state.bookmarksCache.get(key);
+  if (!entry || Date.now() - entry.time > ttl) return null;
+  return entry.data;
+}
+
+function withCacheDiagnostics(data, cacheHit, inFlight) {
+  const cloned = cloneJson(data);
+  cloned.diagnostics = {
+    ...(cloned.diagnostics || {}),
+    cacheHit,
+    inFlight
+  };
+  return cloned;
+}
+
+function clearBookmarksCache(state) {
+  state.bookmarksCache.clear();
+  state.bookmarksInFlight.clear();
+  state.bookmarksCacheGeneration = (state.bookmarksCacheGeneration || 0) + 1;
+}
+
+async function bookmarksCacheKey(token, params) {
+  return `${await sha256Hex(token)}:enrich=${params.enrich ? 1 : 0}:full=${params.full ? 1 : 0}`;
+}
+
+async function sha256Hex(value) {
+  if (globalThis.crypto?.subtle && globalThis.TextEncoder) {
+    const bytes = new TextEncoder().encode(String(value));
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  let hash = 2166136261;
+  const text = String(value);
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv:${(hash >>> 0).toString(16)}`;
+}
+
+function positiveInteger(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(number)));
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 const WATCH_LATER_QUERY = `

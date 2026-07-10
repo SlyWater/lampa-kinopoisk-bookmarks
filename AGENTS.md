@@ -28,3 +28,5 @@
 - Cloudflare Worker is the default proxy target, but `worker/node-server.js` supports self-hosted Ubuntu/Node deployment with the same API contract.
 - Public default proxy URL is `https://lampa-kp.slywater.ru`; keep it editable through the Lampa settings input.
 - Kinopoisk GraphQL query/mutation shape follows the publicly observed `plannedToWatch.add/remove.status` response contract from existing Lampa Kinopoisk plugins.
+- `/bookmarks/list` may be slow because it enriches Kinopoisk items into TMDB cards; the backend uses short in-memory per-token caching plus in-flight request sharing, and the plugin blocks parallel sync starts.
+- Watch-later cards must be deduplicated by Kinopoisk id first, then by TMDB media type/id fallback.

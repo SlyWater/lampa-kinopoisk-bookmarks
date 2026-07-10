@@ -26,6 +26,7 @@
 
   var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4.75C6 3.78 6.78 3 7.75 3h8.5C17.22 3 18 3.78 18 4.75v15.5l-6-3.35-6 3.35V4.75Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
   var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
+  var syncWatchLaterPromise = null;
 
   function getProxyUrl() {
     return String(Lampa.Storage.get(STORAGE.proxyUrl, DEFAULT_PROXY_URL) || DEFAULT_PROXY_URL).replace(/\/+$/, '');
@@ -44,7 +45,7 @@
   }
 
   function setWatchLaterItems(items) {
-    Lampa.Storage.set(STORAGE.watchLaterItems, items || []);
+    Lampa.Storage.set(STORAGE.watchLaterItems, dedupeWatchLaterItems(items || []));
   }
 
   function getLastSync() {
@@ -57,6 +58,9 @@
       remoteCount: Number(data.remoteCount || 0),
       builtCount: Number(data.builtCount || 0),
       cacheCount: Number(data.cacheCount || 0),
+      duplicateCount: Number(data.duplicateCount || 0),
+      cacheHit: Boolean(data.cacheHit),
+      inFlight: Boolean(data.inFlight),
       error: data.error || '',
       sample: data.sample || []
     });
@@ -73,6 +77,29 @@
       }
     }
     return [];
+  }
+
+  function dedupeWatchLaterItems(items) {
+    var seen = {};
+    var result = [];
+
+    normalizeStoredArray(items).forEach(function (item) {
+      var key = watchLaterItemKey(item);
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      result.push(item);
+    });
+
+    return result;
+  }
+
+  function watchLaterItemKey(item) {
+    if (!item) return '';
+    var ids = normalizeMovieIds(item);
+    if (ids.kinopoiskId) return 'kp:' + ids.kinopoiskId;
+    if (ids.tmdbId) return (item.name && !item.title ? 'tv:' : 'movie:') + ids.tmdbId;
+    if (ids.imdbId) return 'imdb:' + ids.imdbId;
+    return '';
   }
 
   function getRatings() {
@@ -225,8 +252,15 @@
   }
 
   function syncWatchLater(showNotice) {
-    return ensureToken().then(function () {
-      return api('/bookmarks/list', { auth: true });
+    if (syncWatchLaterPromise) {
+      if (showNotice) Lampa.Noty.show('Синхронизация уже идёт');
+      return syncWatchLaterPromise;
+    }
+
+    var path = '/bookmarks/list' + (showNotice ? '?refresh=1' : '');
+
+    syncWatchLaterPromise = ensureToken().then(function () {
+      return api(path, { auth: true });
     }).then(function (data) {
       var index = getIndex();
       var remoteKeys = {};
@@ -251,16 +285,21 @@
 
       setIndex(index);
       return buildWatchLaterItems(data, showNotice).then(function (items) {
-        setWatchLaterItems(items);
+        var uniqueItems = dedupeWatchLaterItems(items);
+        var diagnostics = data.diagnostics || {};
+        setWatchLaterItems(uniqueItems);
         setLastSync({
           remoteCount: (data.movies || []).length,
-          builtCount: items.length,
-          cacheCount: items.length,
-          sample: items.slice(0, 3).map(function (item) {
+          builtCount: uniqueItems.length,
+          cacheCount: uniqueItems.length,
+          duplicateCount: Math.max(0, items.length - uniqueItems.length) + Number(diagnostics.duplicateMoviesCount || 0) + Number(diagnostics.duplicateCardsCount || 0),
+          cacheHit: diagnostics.cacheHit,
+          inFlight: diagnostics.inFlight,
+          sample: uniqueItems.slice(0, 3).map(function (item) {
             return item.title || item.name || item.original_title || item.original_name || String(item.id);
           })
         });
-        if (showNotice) Lampa.Noty.show('Буду смотреть обновлено: ' + items.length);
+        if (showNotice) Lampa.Noty.show('Буду смотреть обновлено: ' + uniqueItems.length);
         return index;
       });
     }).catch(function (error) {
@@ -272,6 +311,14 @@
       });
       if (showNotice) Lampa.Noty.show('Не удалось синхронизировать закладки');
       console.log('Kinopoisk Bookmarks', error);
+    });
+
+    return syncWatchLaterPromise.then(function (result) {
+      syncWatchLaterPromise = null;
+      return result;
+    }, function (error) {
+      syncWatchLaterPromise = null;
+      throw error;
     });
   }
 
@@ -461,7 +508,7 @@
   function upsertWatchLaterItem(card) {
     if (!card || !card.id) return;
     var items = getWatchLaterItems().filter(function (item) {
-      return String(item.id) !== String(card.id);
+      return watchLaterItemKey(item) !== watchLaterItemKey(card);
     });
     items.unshift(card);
     setWatchLaterItems(items);
@@ -700,6 +747,7 @@
         setIndex({});
         setRatings({});
         setWatchLaterItems([]);
+        Lampa.Storage.set(STORAGE.lastSync, {});
         Lampa.Noty.show('Кэш закладок очищен');
       }
     });
@@ -724,14 +772,15 @@
       'Кэш Буду смотреть: ' + cache.length,
       'Последняя синхронизация: ' + (last.time || 'нет'),
       'Фильмов от Кинопоиска: ' + (last.remoteCount || 0),
-      'Собрано карточек Lampa: ' + (last.builtCount || 0)
+      'Собрано карточек Lampa: ' + (last.builtCount || 0),
+      'Удалено дублей: ' + (last.duplicateCount || 0)
     ];
 
     if (last.sample && last.sample.length) lines.push('Примеры: ' + last.sample.join(', '));
     if (last.error) lines.push('Ошибка: ' + last.error);
 
     ensureToken().then(function () {
-      return api('/bookmarks/list', { auth: true });
+      return api('/bookmarks/list?refresh=1', { auth: true });
     }).then(function (data) {
       var diagnostics = data.diagnostics || {};
       lines.push('Проверка сейчас: Кинопоиск вернул ' + ((data.movies || []).length) + ' фильмов');
@@ -741,6 +790,10 @@
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
       if (diagnostics.cardsCount !== undefined) lines.push('backend cardsCount: ' + diagnostics.cardsCount);
+      if (diagnostics.duplicateMoviesCount !== undefined) lines.push('backend duplicateMoviesCount: ' + diagnostics.duplicateMoviesCount);
+      if (diagnostics.duplicateCardsCount !== undefined) lines.push('backend duplicateCardsCount: ' + diagnostics.duplicateCardsCount);
+      if (diagnostics.cacheHit !== undefined) lines.push('backend cacheHit: ' + diagnostics.cacheHit);
+      if (diagnostics.inFlight !== undefined) lines.push('backend inFlight: ' + diagnostics.inFlight);
       if (diagnostics.unresolvedCount !== undefined) lines.push('backend unresolvedCount: ' + diagnostics.unresolvedCount);
       if (diagnostics.userDataKeys && diagnostics.userDataKeys.length) lines.push('userDataKeys: ' + diagnostics.userDataKeys.join(', '));
       if (diagnostics.unresolved && diagnostics.unresolved.length) {

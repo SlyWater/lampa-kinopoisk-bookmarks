@@ -234,6 +234,92 @@ test('GET /bookmarks/list paginates Apps Script results', async () => {
   assert.equal(data.movies.length, 2);
 });
 
+test('GET /bookmarks/list caches enriched payload and refresh bypasses cache', async () => {
+  let calls = 0;
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      calls++;
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) return jsonResponse({ data: {} });
+      if (text.includes('script.google.com')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 1,
+                    items: [{ movie: { id: 777, title: { localized: 'Cached' }, productionYear: 2026 } }]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const first = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer cache-token' }
+  }));
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).diagnostics.cacheHit, false);
+  assert.equal(calls, 2);
+
+  const second = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer cache-token' }
+  }));
+  assert.equal(second.status, 200);
+  assert.equal((await second.json()).diagnostics.cacheHit, true);
+  assert.equal(calls, 2);
+
+  const refreshed = await handler(new Request('https://worker.test/bookmarks/list?enrich=0&refresh=1', {
+    headers: { authorization: 'Bearer cache-token' }
+  }));
+  assert.equal(refreshed.status, 200);
+  assert.equal((await refreshed.json()).diagnostics.cacheHit, false);
+  assert.equal(calls, 4);
+});
+
+test('GET /bookmarks/list removes duplicate Kinopoisk movies', async () => {
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      const text = String(url);
+      if (text.includes('graphql.kinopoisk.ru')) {
+        return jsonResponse({
+          data: {
+            userProfile: {
+              userData: {
+                plannedToWatch: {
+                  movies: {
+                    total: 2,
+                    items: [
+                      { movie: { id: 326, title: { localized: 'One' }, productionYear: 1994 } },
+                      { movie: { id: 326, title: { localized: 'One' }, productionYear: 1994 } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected URL ${text}`);
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list?enrich=0', {
+    headers: { authorization: 'Bearer dedupe-token' }
+  }));
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.equal(data.movies.length, 1);
+  assert.equal(data.diagnostics.duplicateMoviesCount, 1);
+});
+
 test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {
   const handler = createWorkerHandler({
     fetch: async (url, options) => {
