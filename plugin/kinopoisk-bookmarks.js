@@ -407,7 +407,13 @@
 
     Lampa.SettingsApi.addParam({
       component: 'kp_bookmarks',
-      param: { name: STORAGE.proxyUrl, type: 'input', default: '' },
+      param: {
+        name: STORAGE.proxyUrl,
+        type: 'input',
+        values: '',
+        default: '',
+        placeholder: 'https://example.workers.dev'
+      },
       field: {
         name: 'URL Worker',
         description: 'Например https://lampa-kp-bookmarks.example.workers.dev'
