@@ -5,6 +5,7 @@
   window.kinopoisk_bookmarks_ready = true;
 
   var PLUGIN_NAME = 'Кинопоиск Закладки';
+  var DEFAULT_PROXY_URL = 'https://lampa-kp.slywater.ru';
   var STORAGE = {
     proxyUrl: 'kp_bookmarks_proxy_url',
     accessToken: 'kp_bookmarks_access_token',
@@ -24,7 +25,7 @@
   var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4.75C6 3.78 6.78 3 7.75 3h8.5C17.22 3 18 3.78 18 4.75v15.5l-6-3.35-6 3.35V4.75Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 
   function getProxyUrl() {
-    return String(Lampa.Storage.get(STORAGE.proxyUrl, '') || '').replace(/\/+$/, '');
+    return String(Lampa.Storage.get(STORAGE.proxyUrl, DEFAULT_PROXY_URL) || DEFAULT_PROXY_URL).replace(/\/+$/, '');
   }
 
   function getIndex() {
@@ -416,12 +417,12 @@
         name: STORAGE.proxyUrl,
         type: 'input',
         values: '',
-        default: '',
-        placeholder: 'https://example.workers.dev'
+        default: DEFAULT_PROXY_URL,
+        placeholder: DEFAULT_PROXY_URL
       },
       field: {
         name: 'URL Worker',
-        description: 'Например https://lampa-kp-bookmarks.example.workers.dev'
+        description: 'По умолчанию используется ' + DEFAULT_PROXY_URL
       }
     });
 

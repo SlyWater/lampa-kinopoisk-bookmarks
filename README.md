@@ -99,6 +99,20 @@ WantedBy=multi-user.target
 
 Дальше nginx/Caddy должен проксировать внешний HTTPS URL на `127.0.0.1:8787`. Именно внешний HTTPS URL нужно вставить в настройку `URL Worker` в Lampa.
 
+Для `slywater.ru` выбран общий proxy URL:
+
+```text
+https://lampa-kp.slywater.ru
+```
+
+Он уже задан в плагине по умолчанию. Обычным пользователям не нужно заполнять `URL Worker`, если этот backend работает.
+
+Готовые шаблоны для сервера:
+
+- `deploy/lampa-kp.env.example`
+- `deploy/lampa-kp.service.example`
+- `deploy/nginx-lampa-kp.conf.example`
+
 ## Установка плагина в Lampa
 
 1. Опубликуйте `plugin/kinopoisk-bookmarks.js` по HTTPS.

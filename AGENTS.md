@@ -25,4 +25,5 @@
 
 - The project starts from an empty folder and uses Node's built-in test runner, with no package dependencies.
 - Cloudflare Worker is the default proxy target, but `worker/node-server.js` supports self-hosted Ubuntu/Node deployment with the same API contract.
+- Public default proxy URL is `https://lampa-kp.slywater.ru`; keep it editable through the Lampa settings input.
 - Kinopoisk GraphQL query/mutation shape follows the publicly observed `plannedToWatch.add/remove.status` response contract from existing Lampa Kinopoisk plugins.

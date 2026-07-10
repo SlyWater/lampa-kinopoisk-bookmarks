@@ -1,0 +1,16 @@
+[Unit]
+Description=Lampa Kinopoisk Bookmarks Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/lampa-kinopoisk-bookmarks
+EnvironmentFile=/etc/lampa-kp.env
+ExecStart=/usr/bin/node worker/node-server.js
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target
