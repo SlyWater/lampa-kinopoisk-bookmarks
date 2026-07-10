@@ -33,3 +33,4 @@
 - `/bookmarks/list` may be slow because it enriches Kinopoisk items into TMDB cards; the backend uses short in-memory per-token caching plus in-flight request sharing, and the plugin blocks parallel sync starts.
 - Watch-later cards must be deduplicated by Kinopoisk id first, then by TMDB media type/id fallback.
 - Manual watch-later sync uses in-memory backend jobs (`/bookmarks/sync/start`, `/bookmarks/sync/status`) so the Lampa plugin can show progress while cards are being enriched.
+- Do not auto-sync watch-later on plugin startup; it can block manual progress UI. Use local cached items until the user starts sync.

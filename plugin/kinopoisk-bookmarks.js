@@ -27,6 +27,7 @@
   var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4.75C6 3.78 6.78 3 7.75 3h8.5C17.22 3 18 3.78 18 4.75v15.5l-6-3.35-6 3.35V4.75Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
   var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
   var syncWatchLaterPromise = null;
+  var syncWatchLaterStartedAt = 0;
   var syncProgressModalOpen = false;
   var syncProgressCloseTimer = null;
 
@@ -240,7 +241,7 @@
             saveToken(tokenData);
             Lampa.Modal.close();
             Lampa.Noty.show('Авторизация Кинопоиска выполнена');
-            syncWatchLater();
+            syncWatchLater(true);
           }).catch(function (error) {
             Lampa.Noty.show('Не удалось получить токен Кинопоиска');
             console.log('Kinopoisk Bookmarks', error);
@@ -255,11 +256,17 @@
 
   function syncWatchLater(showNotice) {
     if (syncWatchLaterPromise) {
-      if (showNotice) Lampa.Noty.show('Синхронизация уже идёт');
-      return syncWatchLaterPromise;
+      if (Date.now() - syncWatchLaterStartedAt > 20 * 60 * 1000) {
+        syncWatchLaterPromise = null;
+        syncWatchLaterStartedAt = 0;
+      } else {
+        if (showNotice) Lampa.Noty.show('Синхронизация уже идёт');
+        return syncWatchLaterPromise;
+      }
     }
 
-    syncWatchLaterPromise = ensureToken().then(function () {
+    syncWatchLaterStartedAt = Date.now();
+    var currentSync = ensureToken().then(function () {
       return showNotice ? runWatchLaterSyncJob() : api('/bookmarks/list', { auth: true });
     }).then(function (data) {
       var index = getIndex();
@@ -316,13 +323,17 @@
       console.log('Kinopoisk Bookmarks', error);
     });
 
-    return syncWatchLaterPromise.then(function (result) {
+    syncWatchLaterPromise = currentSync.then(function (result) {
       syncWatchLaterPromise = null;
+      syncWatchLaterStartedAt = 0;
       return result;
     }, function (error) {
       syncWatchLaterPromise = null;
+      syncWatchLaterStartedAt = 0;
       throw error;
     });
+
+    return syncWatchLaterPromise;
   }
 
   function runWatchLaterSyncJob() {
@@ -996,7 +1007,6 @@
       scheduleMenuItem();
     });
 
-    if (Lampa.Storage.get(STORAGE.accessToken, '')) syncWatchLater(false);
     setInterval(patchVisibleCards, 3000);
   }
 
