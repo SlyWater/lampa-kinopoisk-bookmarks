@@ -151,7 +151,7 @@
     }).then(function (data) {
       if (!data.user_code || !data.device_code) throw new Error('Device code response is incomplete');
 
-      var html = $('<div><div class="about kp-bookmarks-auth">Перейдите на https://ya.ru/device и введите код<div class="kp-bookmarks-auth-qr"></div><b class="kp-bookmarks-auth-code">' + data.user_code + '</b></div><div class="broadcast__device selector kp-bookmarks-auth-ready">Готово</div></div>');
+      var html = $('<div><div class="about kp-bookmarks-auth">Перейдите на https://ya.ru/device и введите код<b class="kp-bookmarks-auth-code">' + data.user_code + '</b><div class="kp-bookmarks-auth-qr"></div></div><div class="broadcast__device selector kp-bookmarks-auth-ready">Готово</div></div>');
       setTimeout(function () {
         if (Lampa.Utils && Lampa.Utils.qrcode) {
           Lampa.Utils.qrcode('https://ya.ru/device', html.find('.kp-bookmarks-auth-qr'));
@@ -362,7 +362,7 @@
 
   function injectStyle() {
     if ($('#kp-bookmarks-style').length) return;
-    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:10em;height:10em;max-width:42vw;max-height:42vw;margin:1em auto .65em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;font-size:1.35em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}</style>');
+    $('body').append('<style id="kp-bookmarks-style">.kp-rating-badges{position:absolute;left:.35em;right:.35em;bottom:.35em;display:flex;gap:.3em;z-index:4;pointer-events:none}.kp-rating-badge{background:rgba(0,0,0,.72);color:#fff;border-radius:.25em;padding:.18em .32em;font-size:.72em;line-height:1;font-weight:700}.kp-rating-badge span{color:#f0c14b;margin-right:.18em}.full-start-new .kp-rating-badges{position:static;margin:.65em 0 0;font-size:1.1em}.card,.card__view,.card__image,.full-start-new__poster{position:relative}.kp-bookmarks-auth{text-align:center}.kp-bookmarks-auth-qr{display:inline-flex;align-items:center;justify-content:center;width:9em;height:9em;max-width:38vw;max-height:38vw;margin:.75em auto .5em;background:#fff;border-radius:.45em;color:#000;overflow:hidden}.kp-bookmarks-auth-qr svg{width:100%;height:100%;display:block}.kp-bookmarks-auth-code{display:block;margin:.55em auto .25em;font-size:1.55em;line-height:1.2;letter-spacing:.08em}.kp-bookmarks-auth-ready{text-align:center}</style>');
   }
 
   function renderRatingBadges(container, ratings) {
