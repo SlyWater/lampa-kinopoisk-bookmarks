@@ -682,11 +682,14 @@
     }).then(function (data) {
       var diagnostics = data.diagnostics || {};
       lines.push('Проверка сейчас: Кинопоиск вернул ' + ((data.movies || []).length) + ' фильмов');
+      if (diagnostics.source) lines.push('Источник списка: ' + diagnostics.source);
       lines.push('hasUserData: ' + Boolean(diagnostics.hasUserData));
       lines.push('hasPlannedToWatch: ' + Boolean(diagnostics.hasPlannedToWatch));
       lines.push('total: ' + (diagnostics.total === null || diagnostics.total === undefined ? 'null' : diagnostics.total));
       lines.push('rawItemsCount: ' + (diagnostics.rawItemsCount === null || diagnostics.rawItemsCount === undefined ? 'null' : diagnostics.rawItemsCount));
       if (diagnostics.userDataKeys && diagnostics.userDataKeys.length) lines.push('userDataKeys: ' + diagnostics.userDataKeys.join(', '));
+      if (diagnostics.topLevelError) lines.push('topLevelError: ' + diagnostics.topLevelError);
+      if (diagnostics.upstreamStatus) lines.push('upstreamStatus: ' + diagnostics.upstreamStatus);
       if (diagnostics.errors && diagnostics.errors.length) {
         lines.push('GraphQL errors: ' + diagnostics.errors.map(function (error) {
           return error.message;

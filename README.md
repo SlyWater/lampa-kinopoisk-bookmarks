@@ -101,6 +101,8 @@ WantedBy=multi-user.target
 
 `ALLOHA_TOKEN` опционален и нужен только для более стабильного получения рейтингов/ID через Alloha. Авторизация Яндекса и синхронизация `Буду смотреть` работают без него.
 
+Если прямой Kinopoisk GraphQL не возвращает пользовательский `plannedToWatch`, backend использует fallback через известный Apps Script endpoint из существующих Lampa-плагинов. Его можно отключить переменной `DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK=1`.
+
 Дальше nginx/Caddy должен проксировать внешний HTTPS URL на `127.0.0.1:8787`. Именно внешний HTTPS URL нужно вставить в настройку `URL Worker` в Lampa.
 
 Для `slywater.ru` выбран общий proxy URL:

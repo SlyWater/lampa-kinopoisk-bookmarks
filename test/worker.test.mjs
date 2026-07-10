@@ -102,6 +102,53 @@ test('GET /bookmarks/list reads plannedToWatch from Kinopoisk GraphQL', async ()
   assert.equal(data.diagnostics.total, 1);
 });
 
+test('GET /bookmarks/list falls back to Apps Script when GraphQL has no userData', async () => {
+  let calls = 0;
+  const handler = createWorkerHandler({
+    fetch: async (url) => {
+      calls++;
+      if (String(url).includes('graphql.kinopoisk.ru')) {
+        return jsonResponse({ data: {} });
+      }
+
+      assert.match(String(url), /script\.google\.com/);
+      assert.match(String(url), /oauth=token/);
+      return jsonResponse({
+        data: {
+          userProfile: {
+            userData: {
+              plannedToWatch: {
+                movies: {
+                  total: 1,
+                  items: [
+                    {
+                      movie: {
+                        id: 500,
+                        title: { localized: 'Фильм', original: 'Movie' },
+                        productionYear: 2026
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+  });
+
+  const response = await handler(new Request('https://worker.test/bookmarks/list', {
+    headers: { authorization: 'Bearer token' }
+  }));
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(calls, 2);
+  assert.equal(data.movies[0].kinopoisk_id, '500');
+  assert.equal(data.diagnostics.source, 'apps_script');
+});
+
 test('POST /bookmarks/watch-later/set returns success for GraphQL SUCCESS status', async () => {
   const handler = createWorkerHandler({
     fetch: async (url, options) => {

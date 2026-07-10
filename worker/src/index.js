@@ -2,6 +2,7 @@ import { formatRatingBadges, mergeBookmarkIndexes, normalizeMovieIds } from '../
 
 const DEFAULT_ALLOHA_TOKEN = '04941a9a3ca3ac16e2b4327347bbc1';
 const DEFAULT_KINOPOISK_GRAPHQL_URL = 'https://graphql.kinopoisk.ru/graphql/';
+const DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL = 'https://script.google.com/macros/s/AKfycbwQhxl9xQPv46uChWJ1UDg6BjSmefbSlTRUoSZz5f1rZDRvdhAGTi6RHyXwcSeyBtPr/exec';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -86,10 +87,25 @@ async function listBookmarks(fetchImpl, env, request) {
   const token = getBearerToken(request);
   if (!token) return json({ error: 'missing_authorization' }, 401);
 
-  const data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
-  const items = data?.data?.userProfile?.userData?.plannedToWatch?.movies?.items || [];
-  const movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
-  const diagnostics = buildBookmarksDiagnostics(data, movies);
+  let data = await kinopoiskGraphql(fetchImpl, env, token, WATCH_LATER_QUERY, {});
+  let items = extractWatchLaterItems(data);
+  let movies = items.map(normalizeKinopoiskListItem).filter(Boolean);
+  let diagnostics = buildBookmarksDiagnostics(data, movies, 'graphql');
+
+  if (!movies.length && env.DISABLE_KINOPOISK_APPS_SCRIPT_FALLBACK !== '1') {
+    const fallback = await kinopoiskAppsScriptList(fetchImpl, env, token);
+    const fallbackItems = extractWatchLaterItems(fallback);
+    const fallbackMovies = fallbackItems.map(normalizeKinopoiskListItem).filter(Boolean);
+
+    if (fallbackMovies.length || !diagnostics.hasUserData) {
+      data = fallback;
+      items = fallbackItems;
+      movies = fallbackMovies;
+      diagnostics = buildBookmarksDiagnostics(data, movies, 'apps_script');
+    } else {
+      diagnostics.fallback = buildBookmarksDiagnostics(fallback, fallbackMovies, 'apps_script');
+    }
+  }
 
   return json({
     movies,
@@ -169,6 +185,14 @@ async function kinopoiskGraphql(fetchImpl, env, token, query, variables) {
   });
 }
 
+async function kinopoiskAppsScriptList(fetchImpl, env, token) {
+  const endpoint = env.KINOPOISK_APPS_SCRIPT_LIST_URL || DEFAULT_KINOPOISK_APPS_SCRIPT_LIST_URL;
+  const separator = endpoint.includes('?') ? '&' : '?';
+  return upstreamJson(fetchImpl, `${endpoint}${separator}oauth=${encodeURIComponent(token)}`, {
+    method: 'GET'
+  });
+}
+
 async function upstreamJson(fetchImpl, url, options) {
   const response = await fetchImpl(url, options);
   const text = await response.text();
@@ -219,13 +243,18 @@ function normalizeKinopoiskListItem(item) {
   };
 }
 
-function buildBookmarksDiagnostics(data, movies) {
+function extractWatchLaterItems(data) {
+  return data?.data?.userProfile?.userData?.plannedToWatch?.movies?.items || [];
+}
+
+function buildBookmarksDiagnostics(data, movies, source) {
   const userProfile = data?.data?.userProfile;
   const userData = userProfile?.userData;
   const plannedToWatch = userData?.plannedToWatch;
   const plannedMovies = plannedToWatch?.movies;
 
   return {
+    source,
     hasData: Boolean(data?.data),
     hasUserProfile: Boolean(userProfile),
     hasUserData: Boolean(userData),
@@ -236,6 +265,8 @@ function buildBookmarksDiagnostics(data, movies) {
     total: plannedMovies?.total ?? null,
     rawItemsCount: Array.isArray(plannedMovies?.items) ? plannedMovies.items.length : null,
     parsedMoviesCount: movies.length,
+    topLevelError: data?.error || '',
+    upstreamStatus: data?.status || null,
     errors: Array.isArray(data?.errors) ? data.errors.map((error) => ({
       message: error.message || '',
       path: error.path || null
